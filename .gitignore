@@ -1,0 +1,33 @@
+# ==============================================================================
+# Git Ignore - Excel SQL Connection & IP Bulk Updater
+# ==============================================================================
+
+# Excel files & lock files (DO NOT COMMIT EXCEL FILES OR DATA)
+*.xlsx
+*.xlsm
+*.xlsb
+*.xls
+~$*.xlsx
+~$*.xlsm
+~$*.xlsb
+~$*.xls
+
+# Backups & Temporary files
+backup_*
+excel_backups/
+*.log
+*.tmp
+
+# OS & Editor generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Agent Scratch & Log files
+scratch/
+.system_generated/
+inspect_siparis.ps1
+test_folder.ps1
+test_picker_proc.ps1

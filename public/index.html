@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel SQL Connection & IP Updater</title>
+    <!-- Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- HEADER -->
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-file-excel"></i>
+                </div>
+                <div class="brand-text">
+                    <h1>Excel SQL Connect <span>Pro</span></h1>
+                    <p>Toplu SQL Server IP, Bağlantı Dizesi ve VBA Makro Güncelleyici</p>
+                </div>
+            </div>
+            <div class="server-status" id="serverStatus">
+                <span class="status-dot pulsing"></span>
+                <span class="status-text">Sunucu Durumu: Bağlanıyor...</span>
+            </div>
+        </header>
+
+        <!-- MAIN CONTENT LAYOUT -->
+        <main class="main-layout">
+            
+            <!-- LEFT PANEL: CONFIG & CONTROLS -->
+            <aside class="control-panel">
+                <!-- FOLDER SECTION -->
+                <div class="card glass-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-folder-open"></i>
+                        <h2>Çalışma Klasörü</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group">
+                            <label for="folderPath">Excel Dosyaları Klasör Yolu</label>
+                            <div class="input-with-icon">
+                                <i class="fa-solid fa-folder"></i>
+                                <input type="text" id="folderPath" placeholder="C:\Klasor\Yolu..." value="c:\Users\alper.ates.LIDER\Desktop\excel-guncelleme" title="Metin kutusuna tıklayarak veya yapıştırarak klasör yolunu doğrudan değiştirebilirsiniz.">
+                            </div>
+                        </div>
+
+                        <div class="action-buttons-stack">
+                            <button id="btnBrowse" class="btn btn-secondary btn-block">
+                                <i class="fa-solid fa-folder-tree"></i> Görsel Klasör Seçici (Gözat...)
+                            </button>
+                            <button id="btnScan" class="btn btn-primary btn-block">
+                                <i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara
+                            </button>
+                            <div class="action-buttons-row">
+                                <button id="btnOpenFolder" class="btn btn-secondary">
+                                    <i class="fa-solid fa-folder-open"></i> Klasörü Aç
+                                </button>
+                                <button id="btnBackup" class="btn btn-secondary">
+                                    <i class="fa-solid fa-shield-halved"></i> Yedeğini Al
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- IP REPLACEMENT RULES SECTION -->
+                <div class="card glass-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-network-wired"></i>
+                        <h2>IP & Metin Değişim Kuralları</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- Detected IPs Quick Chips -->
+                        <div class="quick-chips-section">
+                            <label>Tespit Edilen Eski IP'ler (Hızlı Seçim)</label>
+                            <div id="quickChips" class="quick-chips">
+                                <span class="chip-placeholder">Henüz tarama yapılmadı</span>
+                            </div>
+                        </div>
+
+                        <!-- Rule List -->
+                        <div id="rulesList" class="rules-list">
+                            <div class="rule-item">
+                                <div class="rule-inputs">
+                                    <div class="input-field">
+                                        <small>Eski IP / Metin</small>
+                                        <input type="text" class="rule-old" placeholder="Örn: 192.168.2.15" value="192.168.2.15">
+                                    </div>
+                                    <div class="rule-arrow"><i class="fa-solid fa-arrow-right"></i></div>
+                                    <div class="input-field">
+                                        <small>Yeni IP / Metin</small>
+                                        <input type="text" class="rule-new" placeholder="Örn: 10.0.0.100" value="10.0.0.100">
+                                    </div>
+                                </div>
+                                <button class="btn-remove-rule" title="Kuralı Sil"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                        </div>
+
+                        <button id="btnAddRule" class="btn btn-outline-sm mt-2">
+                            <i class="fa-solid fa-plus"></i> Yeni Değişim Kuralı Ekle
+                        </button>
+
+                        <hr class="divider">
+
+                        <!-- OPTIONS CHECKBOXES -->
+                        <div class="options-group">
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="chkQueries" checked>
+                                <span class="checkmark"></span>
+                                Power Query Formüllerini Güncelle
+                            </label>
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="chkConnections" checked>
+                                <span class="checkmark"></span>
+                                Veri Bağlantı Cümlelerini (OLEDB/ODBC) Güncelle
+                            </label>
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="chkVba" checked>
+                                <span class="checkmark"></span>
+                                VBA Makro Kodlarını Güncelle
+                            </label>
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="chkAutoBackup" checked>
+                                <span class="checkmark"></span>
+                                Güncellemeden Önce Otomatik Yedek Al
+                            </label>
+                        </div>
+
+                        <!-- EXECUTE BUTTON -->
+                        <button id="btnExecuteUpdate" class="btn btn-gradient btn-block btn-lg mt-3">
+                            <i class="fa-solid fa-bolt"></i> Toplu Güncellemeyi Başlat
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- RIGHT PANEL: DASHBOARD & TABLES -->
+            <section class="dashboard-panel">
+                <!-- STATS COUNTERS -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon icon-blue"><i class="fa-solid fa-file-excel"></i></div>
+                        <div class="stat-info">
+                            <h3 id="statTotalFiles">0</h3>
+                            <p>Toplam Excel Dosyası</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon icon-purple"><i class="fa-solid fa-database"></i></div>
+                        <div class="stat-info">
+                            <h3 id="statPowerQueries">0</h3>
+                            <p>Power Query Sorgusu</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon icon-amber"><i class="fa-solid fa-plug"></i></div>
+                        <div class="stat-info">
+                            <h3 id="statConnections">0</h3>
+                            <p>Veri Bağlantısı</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon icon-emerald"><i class="fa-solid fa-code"></i></div>
+                        <div class="stat-info">
+                            <h3 id="statVbaModules">0</h3>
+                            <p>VBA Makro Modülü</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PROGRESS BAR (HIDDEN BY DEFAULT) -->
+                <div id="progressSection" class="card glass-card progress-card hidden">
+                    <div class="progress-header">
+                        <span id="progressStatusText">İşlem Yapılıyor...</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- FILES DATA TABLE CARD -->
+                <div class="card glass-card table-card">
+                    <div class="card-header table-header">
+                        <div class="header-title">
+                            <i class="fa-solid fa-table-list"></i>
+                            <h2>Tarama & Önizleme Sonuçları</h2>
+                        </div>
+                        <div class="table-actions">
+                            <div class="search-box">
+                                <i class="fa-solid fa-search"></i>
+                                <input type="text" id="tableSearch" placeholder="Dosya adı veya IP ara...">
+                            </div>
+                            <span class="badge badge-info" id="badgeFileCount">0 Dosya Listelendi</span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="custom-table" id="filesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Dosya Adı</th>
+                                        <th>Tür</th>
+                                        <th>Power Query</th>
+                                        <th>Bağlantılar</th>
+                                        <th>VBA Makro</th>
+                                        <th>Bulunan IP'ler</th>
+                                        <th>Durum</th>
+                                        <th>Detay</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr class="empty-row">
+                                        <td colspan="8">
+                                            <div class="empty-state">
+                                                <i class="fa-solid fa-folder-open empty-icon"></i>
+                                                <p>Henüz bir tarama yapılmadı. Sol menüden "Klasörü Tara" butonuna tıklayarak başlayabilirsiniz.</p>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LIVE LOG CONSOLE -->
+                <div class="card glass-card log-card">
+                    <div class="card-header log-header">
+                        <div class="header-title">
+                            <i class="fa-solid fa-terminal"></i>
+                            <h2>Canlı İşlem Günlüğü (Console)</h2>
+                        </div>
+                        <div class="log-actions">
+                            <button id="btnClearLog" class="btn btn-icon" title="Temizle"><i class="fa-solid fa-eraser"></i></button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="logConsole" class="log-console">
+                            <div class="log-entry log-info">[SYSTEM] Excel SQL Server Bulk Updater hazır. Klasör taraması bekleniyor...</div>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+        </main>
+    </div>
+
+    <!-- FOLDER BROWSER MODAL -->
+    <div id="folderBrowserModal" class="modal">
+        <div class="modal-content glass-card folder-modal-content">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-folder-tree"></i> Görsel Klasör Seçici (Gözat)</h3>
+                <button class="modal-close" id="btnFolderModalClose">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Quick Shortcuts Chips -->
+                <div class="folder-shortcuts">
+                    <small class="text-dim display-block mb-1">Hızlı Yol Seçimi:</small>
+                    <div class="shortcuts-chips">
+                        <button class="chip-btn" id="btnShortcutDesktop"><i class="fa-solid fa-desktop"></i> Masaüstü</button>
+                        <button class="chip-btn" id="btnShortcutDownloads"><i class="fa-solid fa-download"></i> İndirilenler</button>
+                        <button class="chip-btn" id="btnShortcutProject"><i class="fa-solid fa-folder"></i> Proje Klasörü</button>
+                        <button class="chip-btn" id="btnShortcutC"><i class="fa-solid fa-hard-drive"></i> C:\</button>
+                        <button class="chip-btn" id="btnShortcutD"><i class="fa-solid fa-hard-drive"></i> D:\</button>
+                    </div>
+                </div>
+
+                <!-- Current Path Bar -->
+                <div class="input-group mt-3">
+                    <label>Seçilen Klasör Yolu</label>
+                    <div class="path-navigation-bar">
+                        <button id="btnPathUp" class="btn btn-secondary" title="Üst Klasöre Çık"><i class="fa-solid fa-arrow-up"></i> Üst Klasör</button>
+                        <input type="text" id="modalFolderPathInput" placeholder="C:\Klasor\Yolu..." value="">
+                    </div>
+                </div>
+
+                <!-- Subfolders Grid -->
+                <div class="subfolders-section mt-3">
+                    <small class="text-dim display-block mb-2">Klasörler (Girmek için tıklayın):</small>
+                    <div id="subfoldersList" class="subfolders-grid">
+                        <div class="subfolder-card-placeholder">Yükleniyor...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btnSelectCurrentFolder" class="btn btn-primary btn-block btn-lg">
+                    <i class="fa-solid fa-check"></i> Bu Klasörü Seç ve Tara
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL FOR DETAILED FILE PREVIEW -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content glass-card">
+            <div class="modal-header">
+                <h3 id="modalFileName"><i class="fa-solid fa-file-excel"></i> Dosya Detayları</h3>
+                <button class="modal-close" id="btnModalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Dynamic Content Loaded by JS -->
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
