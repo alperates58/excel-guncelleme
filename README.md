@@ -1,48 +1,102 @@
-# Excel SQL Connection & IP Bulk Updater 🚀
+# Excel SQL Connect Pro 🚀
+### Toplu Excel SQL Server IP, Bağlantı Dizesi ve VBA Makro Güncelleyici
 
-**Excel SQL Connect Pro**, 100-200+ adet Excel (`.xlsx`, `.xlsm`, `.xlsb`) dosyasındaki **SQL Server IP adreslerini, OLEDB/ODBC Veri Bağlantı cümlelerini, Power Query formüllerini ve VBA Makro kodlarını** toplu olarak taramak, yedeklemek ve tek tıkla güncellemek için geliştirilmiş web tabanlı bir masaüstü otomasyon aracıdır.
+[![Excel Automation](https://img.shields.io/badge/Excel-COM%20Interop-green.svg)](https://microsoft.com/excel)
+[![PowerShell REST API](https://img.shields.io/badge/Backend-PowerShell%205.1+-blue.svg)](https://microsoft.com/powershell)
+[![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+
+**Excel SQL Connect Pro**, şirketinizdeki SQL Server IP adresi veya sunucu adı değiştiğinde yüzlerce (100 - 200+) Excel raporunu tek tek elle düzenleme derdini ortadan kaldıran **taşınabilir (portable), ultra-hızlı ve web tabanlı bir masaüstü otomasyon aracıdır**.
 
 ---
 
-## 🌟 Öne Çıkan Özellikler
+## 🎯 Çözülen Problem
 
-- **🔍 Kapsamlı Tarama Motoru**:
-  - **Power Query Sorguları**: Tüm `Sql.Databases("IP", ...)` M formüllerini tespit eder.
+SQL Server IP adresi değiştiğinde (Örn: `192.168.2.15` ➔ `10.0.0.100` veya `192.168.2.8` ➔ `192.168.2.50`):
+- Excel'deki **Power Query M sorguları** bozulur ve veri çekemez.
+- **OLEDB ve ODBC veri bağlantı cümleleri** eski IP'ye bağlanmaya çalışır.
+- **VBA Makro kodları** içerisindeki ADODB / DAO bağlantı stringleri hata verir.
+
+Bu araç ile belirttiğiniz klasördeki tüm Excel dosyaları sırayla taranır, eski IP'ler tespit edilir ve **tüm sorgular, veri bağlantıları ve makrolar tek tıkla toplu olarak güncellenir**.
+
+---
+
+## ✨ Öne Çıkan Özellikler
+
+- 🔍 **Kapsamlı 3'ü 1 Arada Tarama Engine**:
+  - **Power Query M Sorguları**: `Sql.Databases("192.168.2.15", ...)` tüm formülleri inceler.
   - **Veri Bağlantıları**: OLEDB, ODBC, Mashup ve Data Model bağlantı cümlelerini (`ConnectionString`), bağlantı adlarını (`Connection Name`) ve SQL komut metinlerini (`CommandText`) inceler.
-  - **VBA Makro Kodları**: `.xlsm` ve `.xlsb` dosyalarındaki makro modüllerindeki IP adreslerini tarar.
-- **📁 Görsel Web Klasör Seçici (Gözat)**: Masaüstü, İndirilenler, sürücüler (`C:\`, `D:\`) ve alt klasörler arasında görsel gezinti sunar.
-- **📊 Canlı İlerleme Çubuğu (Real-time Progress)**: 150+ dosyalık klasörler taranırken ve güncellenirken anlık dosya sayısı, işlenen dosya adı ve yüzde oranını gösterir.
-- **🛡️ Otomatik Güvenli Yedekleme**: Değişiklik yapılmadan önce tüm Excel dosyalarını Windows Geçici Klasörüne (`%TEMP%\excel_backups`) güvenle kopyalar.
-- **🚀 Portable & Standalone**: Kurulum veya Node.js gerektirmez, herhangi bir Windows bilgisayarda `.bat` dosyasına çift tıklanarak çalışır.
+  - **VBA Makro Kodları**: `.xlsm` ve `.xlsb` dosyalarındaki makro modüllerini satır satır tarar.
+- 📁 **Görsel Web Klasör Seçici (Gözat)**:
+  - Masaüstü, İndirilenler, sürücüler (`C:\`, `D:\`) ve alt klasörler arasında görsel gezinti sunar.
+- 📊 **Canlı İlerleme Çubuğu (Real-time Progress Streaming)**:
+  - 150+ dosyalık klasörler taranırken ve güncellenirken anlık dosya sayısı (`66 / 157`), işlenen dosya adı ve yüzde oranını (`%42`) ekranda canlı olarak gösterir.
+- 🛡️ **Otomatik Güvenli Yedekleme**:
+  - Güncelleme işleminden önce dosyalarınızın tamamını otomatik olarak Windows Geçici Klasörüne (`%TEMP%\excel_backups\backup_YYYYMMDD_HHMMSS`) yedekler.
+- ⚡ **Taşınabilir & Sıfır Bağımlılık (Portable)**:
+  - `Node.js`, `npm` veya üçüncü taraf kurulum gerektirmez. Windows üzerinde yerleşik PowerShell ve Excel Interop ile çalışır. `.bat` dosyasına çift tıklamanız yeterlidir!
 
 ---
 
-## 📁 Proje Yapısı
+## 💻 Ekran Görüntüsü ve Kullanım Akışı
+
+```
+ +-----------------------------------------------------------------------+
+ | Excel SQL Connect Pro                                    ● Sunucu Aktif|
+ +-----------------------------------------------------------------------+
+ | 📁 Çalışma Klasörü        | 📊 Sayaçlar                               |
+ | [ C:\Sirket\Exceller   ]  |   157 Dosya | 45 Sorgu | 12 Bağlantı    |
+ | [ 📁 Görsel Klasör Seç ]  |                                           |
+ | [ 🔍 Klasörü Tara      ]  | 📋 Tarama & Önizleme Sonuçları Tablosu    |
+ |                           |   Dosya Adı | Tür | Sorgu | IP'ler | Detay|
+ | ⚙️ IP Değişim Kuralları   |   --------------------------------------- |
+ | [ 192.168.2.15 ] ➔ [ 10.0.0.100 ]                                    |
+ |                           | 📈 Canlı İlerleme Çubuğu (%42)             |
+ | [ ⚡ Toplu Güncelle ]     | 💻 Canlı İşlem Günlüğü (Console)           |
+ +-----------------------------------------------------------------------+
+```
+
+---
+
+## 🚀 Hızlı Başlangıç (Kullanım Kılavuzu)
+
+1. Projeyi klonlayın veya zip olarak indirin:
+   ```bash
+   git clone https://github.com/alperates58/excel-guncelleme.git
+   ```
+2. Klasör içindeki **`BAŞLAT_Excel_Updater.bat`** dosyasına çift tıklayın.
+3. Otomatik olarak açılan tarayıcı ekranında (`http://localhost:3005`):
+   - **`Görsel Klasör Seçici (Gözat...)`** butonuna tıklayarak Excel dosyalarınızın bulunduğu klasörü seçin.
+   - **`Klasörü Tara`** butonuna basın.
+   - Tespit edilen eski IP'nin yanına yeni IP adresinizi yazın.
+   - **`Toplu Güncellemeyi Başlat`** butonuna basarak tüm dosyalarınızı saniyeler içinde güncelleyin!
+
+---
+
+## 📁 Proje Klasör Yapısı
 
 ```
 excel-guncelleme/
-├── BAŞLAT_Excel_Updater.bat  # Masaüstü hızlı başlatıcı (Çift tıkla çalıştır)
+├── BAŞLAT_Excel_Updater.bat  # Masaüstü çift tıkla başlatıcı scripti
 ├── server.ps1                # PowerShell REST API sunucusu (Port 3005)
 ├── engine/
-│   └── excel_engine.ps1      # Excel COM interop otomasyon motoru
+│   └── excel_engine.ps1      # Excel COM Interop otomasyon & tarama motoru
 ├── public/
-│   ├── index.html            # Ultra modern dark-mode arayüz
-│   ├── style.css             # Glassmorphism stil dosyası
+│   ├── index.html            # Ultra modern dark-mode HTML5 arayüz
+│   ├── style.css             # Glassmorphism stil kütüphanesi
 │   └── app.js                # Frontend istemci mantığı & canlı polling
-└── .gitignore                # Excel ve yedek dosyalarının yüklenmesini engeller
+├── README.md                 # Detaylı Türkçe dokümantasyon
+└── .gitignore                # Excel ve yedek dosyalarının gizlilik koruması
 ```
 
 ---
 
-## 🚀 Çalıştırma Talimatı
+## 🔒 Gizlilik ve Güvenlik İlkeleri
 
-1. Projeyi indirin veya klonlayın.
-2. Klasör içindeki **`BAŞLAT_Excel_Updater.bat`** dosyasına çift tıklayın.
-3. Uygulama otomatik olarak varsayılan tarayıcınızda `http://localhost:3005/` adresinde açılacaktır.
+- Bu açık kaynak depo **yalnızca uygulamanın kaynak kodlarını** içermektedir.
+- Şirketinize veya şahsınıza ait **Excel dosyaları, veri bağlantıları ve yedek klasörleri kesinlikle bu depoya yüklenmez** (`.gitignore` korumalıdır).
 
 ---
 
-## 🔒 Güvenlik & Gizlilik
+## 📜 Lisans
 
-- Bu depo yalnızca uygulama kaynak kodlarını içerir.
-- **Excel dosyaları, şirket verileri ve yedek klasörleri kesinlikle bu depoya yüklenmez** (`.gitignore` korumalıdır).
+Bu proje [MIT Lisansı](LICENSE) altında piyasaya sürülmüştür. Özgürce kullanabilir ve geliştirebilirsiniz.
