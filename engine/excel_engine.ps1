@@ -29,15 +29,19 @@ function New-OperationId () {
 
 function Get-FileSha256 ([string]$FilePath) {
     if (-not (Test-Path $FilePath)) { return $null }
-    $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        $hashBytes = $sha.ComputeHash($stream)
-        return [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToUpper()
-    } finally {
-        $stream.Close()
-        $stream.Dispose()
-        if ($sha) { $sha.Dispose() }
+        $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $hashBytes = $sha.ComputeHash($stream)
+            return [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToUpper()
+        } finally {
+            $stream.Close()
+            $stream.Dispose()
+            if ($sha) { $sha.Dispose() }
+        }
+    } catch {
+        return $null
     }
 }
 
@@ -878,14 +882,57 @@ function Commit-StagingWorkbook {
         }
     }
 
+    $opTag = if ([string]::IsNullOrWhiteSpace($OperationId)) { [System.Guid]::NewGuid().ToString("N").Substring(0, 8) } else { $OperationId }
+    $replaceBak = "$OriginalPath.$opTag.replace_bak"
+    $renameBak = "$OriginalPath.$opTag.rename_bak"
+
     # 1. TOCTOU Concurrency Guard: verify original has not been modified since initial read
     $currentHash = Get-FileSha256 $OriginalPath
     if ($currentHash -ne $InitialHash) {
-        Remove-Item -LiteralPath $StagingPath -Force -ErrorAction SilentlyContinue
-        return @{
-            Success = $false
-            ErrorCode = "CONCURRENT_MODIFICATION_DETECTED"
-            Error = "Original file was modified by another process/user while update was in progress. Operation aborted for safety."
+        # Check if rename_bak already exists and holds the initial file (double-fault / interrupted Phase 1 recovery)
+        if ((Test-Path -LiteralPath $renameBak) -and ((Get-FileSha256 $renameBak) -eq $InitialHash)) {
+            # Staging -> Original attempt
+            $stagingMoveErr = $null
+            try {
+                Move-Item -LiteralPath $StagingPath -Destination $OriginalPath -Force -ErrorAction Stop
+                $replaceBak = $renameBak
+            } catch {
+                $stagingMoveErr = $_
+                # Staging move failed -> rollback original from renameBak!
+                $rollbackSuccess = $false
+                try {
+                    Move-Item -LiteralPath $renameBak -Destination $OriginalPath -Force -ErrorAction Stop
+                    $rollbackSuccess = (Test-Path -LiteralPath $OriginalPath)
+                } catch {
+                    $rollbackSuccess = $false
+                }
+
+                if (-not $rollbackSuccess) {
+                    # DOUBLE FAULT!
+                    return @{
+                        Success = $false
+                        ErrorCode = "CRITICAL_MANUAL_RECOVERY_REQUIRED"
+                        Error = "CRITICAL: Two-phase commit double fault! Staging replacement failed ($stagingMoveErr) and rollback of original file from '$renameBak' to '$OriginalPath' also failed! Original file content remains at '$renameBak'. DO NOT DELETE."
+                        recoveryFilePath = $renameBak
+                        originalExpectedPath = $OriginalPath
+                        stagingPath = $StagingPath
+                        operationId = $opTag
+                    }
+                }
+
+                return @{
+                    Success = $false
+                    ErrorCode = "COMMIT_RENAME_FAILED"
+                    Error = "Two-phase rename fallback failed: $stagingMoveErr. Original file successfully rolled back from rename backup."
+                }
+            }
+        } else {
+            Remove-Item -LiteralPath $StagingPath -Force -ErrorAction SilentlyContinue
+            return @{
+                Success = $false
+                ErrorCode = "CONCURRENT_MODIFICATION_DETECTED"
+                Error = "Original file was modified by another process/user while update was in progress. Operation aborted for safety."
+            }
         }
     }
 
@@ -899,8 +946,6 @@ function Commit-StagingWorkbook {
     } catch { }
 
     $methodUsed = "None"
-    $opTag = if ([string]::IsNullOrWhiteSpace($OperationId)) { [System.Guid]::NewGuid().ToString("N").Substring(0, 8) } else { $OperationId }
-    $replaceBak = "$OriginalPath.$opTag.replace_bak"
 
     # 3. Primary: Try [System.IO.File]::Replace
     $primarySuccess = $false
@@ -915,25 +960,45 @@ function Commit-StagingWorkbook {
     } catch {
         # Fallback to Two-Phase Rename
         $methodUsed = "TwoPhaseRename"
-        $renameBak = "$OriginalPath.$opTag.rename_bak"
         try {
             if (Test-Path -LiteralPath $renameBak) {
                 Remove-Item -LiteralPath $renameBak -Force -ErrorAction SilentlyContinue
             }
 
-            Move-Item -LiteralPath $OriginalPath -Destination $renameBak -Force
+            Move-Item -LiteralPath $OriginalPath -Destination $renameBak -Force -ErrorAction Stop
             try {
-                Move-Item -LiteralPath $StagingPath -Destination $OriginalPath -Force
+                Move-Item -LiteralPath $StagingPath -Destination $OriginalPath -Force -ErrorAction Stop
                 $replaceBak = $renameBak
             } catch {
+                $stagingMoveErr = $_
                 # Staging move failed -> rollback original from renameBak!
-                if (Test-Path -LiteralPath $renameBak) {
-                    Move-Item -LiteralPath $renameBak -Destination $OriginalPath -Force -ErrorAction SilentlyContinue
+                $rollbackSuccess = $false
+                try {
+                    if (Test-Path -LiteralPath $renameBak) {
+                        Move-Item -LiteralPath $renameBak -Destination $OriginalPath -Force -ErrorAction Stop
+                        $rollbackSuccess = (Test-Path -LiteralPath $OriginalPath)
+                    }
+                } catch {
+                    $rollbackSuccess = $false
                 }
+
+                if (-not $rollbackSuccess) {
+                    # DOUBLE FAULT!
+                    return @{
+                        Success = $false
+                        ErrorCode = "CRITICAL_MANUAL_RECOVERY_REQUIRED"
+                        Error = "CRITICAL: Two-phase commit double fault! Staging move failed ($stagingMoveErr) and rollback of original file from '$renameBak' to '$OriginalPath' also failed! Original file content remains at '$renameBak'. DO NOT DELETE."
+                        recoveryFilePath = $renameBak
+                        originalExpectedPath = $OriginalPath
+                        stagingPath = $StagingPath
+                        operationId = $opTag
+                    }
+                }
+
                 return @{
                     Success = $false
                     ErrorCode = "COMMIT_RENAME_FAILED"
-                    Error = "Two-phase rename fallback failed: $_. Original file rolled back."
+                    Error = "Two-phase rename fallback failed: $stagingMoveErr. Original file successfully rolled back from rename backup."
                 }
             }
         } catch {
@@ -951,6 +1016,10 @@ function Commit-StagingWorkbook {
             Success = $false
             ErrorCode = "POST_COMMIT_MISSING"
             Error = "Target file missing after commit attempt!"
+            recoveryFilePath = (if (Test-Path -LiteralPath $replaceBak) { $replaceBak } else { $null })
+            originalExpectedPath = $OriginalPath
+            stagingPath = $StagingPath
+            operationId = $opTag
         }
     }
 
@@ -960,6 +1029,10 @@ function Commit-StagingWorkbook {
             Success = $false
             ErrorCode = "POST_COMMIT_SIZE_MISMATCH"
             Error = "Target file length mismatch: expected $stagingLength bytes, found $($finalItem.Length) bytes."
+            recoveryFilePath = (if (Test-Path -LiteralPath $replaceBak) { $replaceBak } else { $null })
+            originalExpectedPath = $OriginalPath
+            stagingPath = $StagingPath
+            operationId = $opTag
         }
     }
 
@@ -969,6 +1042,10 @@ function Commit-StagingWorkbook {
             Success = $false
             ErrorCode = "POST_COMMIT_HASH_MISMATCH"
             Error = "Target file hash mismatch after commit: expected $stagingHash, found $finalHash."
+            recoveryFilePath = (if (Test-Path -LiteralPath $replaceBak) { $replaceBak } else { $null })
+            originalExpectedPath = $OriginalPath
+            stagingPath = $StagingPath
+            operationId = $opTag
         }
     }
 
@@ -1311,6 +1388,9 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
                     # 11. Commit staging file using guarded Commit-StagingWorkbook
                     $commitRes = Commit-StagingWorkbook -StagingPath $stagingPath -OriginalPath $file.FullName -InitialHash $initialHash -OperationId $opId
                     if (-not $commitRes.Success) {
+                        if ($commitRes.ErrorCode -eq "CRITICAL_MANUAL_RECOVERY_REQUIRED") {
+                            $fileLog.criticalRecovery = $commitRes
+                        }
                         throw "Commit failed: $($commitRes.Error) (Code: $($commitRes.ErrorCode))"
                     }
 
@@ -1325,13 +1405,19 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
                 $fileLog.status = "Error"
                 $fileLog.details += "File error: $_"
 
+                if ($commitRes -and $commitRes.ErrorCode -eq "CRITICAL_MANUAL_RECOVERY_REQUIRED") {
+                    $fileLog.criticalRecovery = $commitRes
+                    $fileLog.details += "CRITICAL: Manual recovery required. Recovery file: $($commitRes.recoveryFilePath)"
+                } else {
+                    if ($stagingPath -and (Test-Path -LiteralPath $stagingPath)) {
+                        Remove-StagingFile -StagingPath $stagingPath
+                    }
+                }
+
                 if ($wb) {
                     try { $wb.Close($false) } catch { }
                     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null } catch { }
                     $wb = $null
-                }
-                if ($stagingPath -and (Test-Path -LiteralPath $stagingPath)) {
-                    Remove-StagingFile -StagingPath $stagingPath
                 }
 
                 # If atomicBatch is enabled, stop immediately on first error
