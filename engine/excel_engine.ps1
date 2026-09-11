@@ -502,27 +502,39 @@ function Remove-StagingFile ([string]$StagingPath) {
 }
 
 function New-IsolatedExcelInstance () {
+    # 1. Capture existing EXCEL processes before spawning (zero compiler dependency)
+    $beforePids = [System.Collections.Generic.HashSet[int]]::new()
+    Get-Process excel -ErrorAction SilentlyContinue | ForEach-Object { $beforePids.Add($_.Id) | Out-Null }
+    $spawnTime = [System.DateTime]::UtcNow
+
+    # 2. Instantiate isolated Excel COM Application
     $excel = New-Object -ComObject Excel.Application
 
-    # Detect exact PID
+    # 3. Deterministically detect newly spawned PID via process delta and disambiguation
     $excelPid = 0
+    $isAmbiguous = $false
     try {
-        if (-not ([System.Management.Automation.PSTypeName]'Win32ExcelNative').Type) {
-            Add-Type -TypeDefinition @"
-            using System;
-            using System.Runtime.InteropServices;
-            public class Win32ExcelNative {
-                [DllImport("user32.dll", SetLastError=true)]
-                public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        $candidatePids = @()
+        $nowProcesses = Get-Process excel -ErrorAction SilentlyContinue
+        foreach ($p in $nowProcesses) {
+            if (-not $beforePids.Contains($p.Id)) {
+                $candidatePids += $p.Id
             }
-"@
         }
-        [uint32]$pidOut = 0
-        [Win32ExcelNative]::GetWindowThreadProcessId([IntPtr]$excel.Hwnd, [ref]$pidOut) | Out-Null
-        $excelPid = [int]$pidOut
-    } catch { }
 
-    # Capture original application properties to preserve them
+        if ($candidatePids.Count -eq 1) {
+            $excelPid = $candidatePids[0]
+        } else {
+            # 0 or multiple candidates -> Ambiguous! Never kill an ambiguous PID.
+            $excelPid = 0
+            $isAmbiguous = $true
+        }
+    } catch {
+        $excelPid = 0
+        $isAmbiguous = $true
+    }
+
+    # 4. Capture original application properties to preserve them
     $origCalc = -4105 # xlCalculationAutomatic default
     try { $origCalc = $excel.Calculation } catch { }
 
@@ -532,7 +544,7 @@ function New-IsolatedExcelInstance () {
     $origSecurity = 1 # msoAutomationSecurityByUI default
     try { $origSecurity = $excel.AutomationSecurity } catch { }
 
-    # Apply strict automation isolation flags
+    # 5. Apply strict automation isolation flags
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.ScreenUpdating = $false
@@ -546,6 +558,7 @@ function New-IsolatedExcelInstance () {
         App = $excel
         Excel = $excel
         Pid = $excelPid
+        IsAmbiguousPid = $isAmbiguous
         OriginalCalculation = $origCalc
         OriginalCalculateBeforeSave = $origCalcBeforeSave
         OriginalAutomationSecurity = $origSecurity
@@ -564,6 +577,7 @@ function Restore-ExcelIsolation ($excelContext) {
 }
 
 function Close-IsolatedExcelInstance ($excelContext) {
+    # A) PRIMARY MECHANISM: Deterministic RCW cleanup and application quit
     if ($excelContext -and $excelContext.App) {
         $app = $excelContext.App
         try {
@@ -573,19 +587,29 @@ function Close-IsolatedExcelInstance ($excelContext) {
         try {
             [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null
         } catch { }
+        $app = $null
     }
 
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 
-    # Kill ONLY this isolated process if still hung after 1 second
-    if ($excelContext -and $excelContext.Pid -gt 0) {
-        Start-Sleep -Milliseconds 150
-        $p = Get-Process -Id $excelContext.Pid -ErrorAction SilentlyContinue
-        if ($p -and -not $p.HasExited) {
-            try { Stop-Process -Id $excelContext.Pid -Force -ErrorAction SilentlyContinue } catch { }
-        }
+    # B) LAST RESORT ONLY: Terminate only the verified, disambiguated PID
+    # Never kill if PID is 0 or ambiguous to protect user's open Excel documents
+    if ($excelContext -and $excelContext.Pid -gt 0 -and (-not $excelContext.IsAmbiguousPid)) {
+        Start-Sleep -Milliseconds 200
+        try {
+            $p = Get-Process -Id $excelContext.Pid -ErrorAction SilentlyContinue
+            if ($p -and -not $p.HasExited) {
+                Start-Sleep -Milliseconds 300
+                if (-not $p.HasExited) {
+                    $p.Kill()
+                }
+            }
+        } catch { }
     }
+
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
 }
 
 function Get-WorkbookSnapshot ($Workbook, [bool]$HasVba = $false) {
