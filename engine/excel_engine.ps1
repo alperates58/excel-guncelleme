@@ -913,20 +913,8 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
             if ($updateConnections) {
                 try {
                     foreach ($conn in $wb.Connections) {
-                        $oldName = $conn.Name
-                        $newName = $oldName
-                        foreach ($rule in $validRules) {
-                            if ($newName.Contains($rule.oldText)) {
-                                $newName = $newName.Replace($rule.oldText, $rule.newText)
-                                $fileLog.changesMade++
-                                $totalReplacements++
-                                $fileLog.details += "Connection Name '$oldName': '$($rule.oldText)' -> '$($rule.newText)'"
-                            }
-                        }
-                        if ($newName -ne $oldName) {
-                            try { $conn.Name = $newName } catch { }
-                            $fileModified = $true
-                        }
+                        # Connection names must remain immutable to protect PivotTables, Data Models and VBA references.
+                        # Only connection strings and command texts are updated.
 
                         try {
                             if ($conn.OLEDBConnection) {
