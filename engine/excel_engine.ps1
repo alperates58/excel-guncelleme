@@ -589,27 +589,38 @@ function Close-IsolatedExcelInstance ($excelContext) {
             $app.Quit()
         } catch { }
         try {
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($app) | Out-Null
         } catch { }
         $app = $null
+        $excelContext.App = $null
+        $excelContext.Excel = $null
     }
 
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 
-    # B) LAST RESORT ONLY: Terminate only the verified, disambiguated PID
+    # B) Wait for graceful exit, or as a LAST RESORT terminate only the verified, disambiguated PID
     # Never kill if PID is 0 or ambiguous to protect user's open Excel documents
     if ($excelContext -and $excelContext.Pid -gt 0 -and (-not $excelContext.IsAmbiguousPid)) {
-        Start-Sleep -Milliseconds 200
-        try {
-            $p = Get-Process -Id $excelContext.Pid -ErrorAction SilentlyContinue
-            if ($p -and -not $p.HasExited) {
-                Start-Sleep -Milliseconds 300
-                if (-not $p.HasExited) {
+        $targetPid = $excelContext.Pid
+        $exitedCleanly = $false
+        for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Milliseconds 100
+            $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+            if (-not $p -or $p.HasExited) {
+                $exitedCleanly = $true
+                break
+            }
+        }
+
+        if (-not $exitedCleanly) {
+            try {
+                $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+                if ($p -and -not $p.HasExited) {
                     $p.Kill()
                 }
-            }
-        } catch { }
+            } catch { }
+        }
     }
 
     [System.GC]::Collect()

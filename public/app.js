@@ -644,9 +644,21 @@ async function runUpdate() {
             if (data.batchStatus === 'ROLLED_BACK') {
                 appendLog(`GÜVENLİ İŞLEM: Hata nedeniyle yapılan tüm değişiklikler geri alındı (Rollback). Orijinal dosyalar korundu.`, 'warning');
                 alert(`İşlem Sırasında Hata Oluştu!\n\nVeri güvenliği gereği yapılan tüm değişiklikler otomatik olarak geri alındı (Rollback).\nOrijinal dosyalarınız korunmuştur.\n\nHata Detayı: ${data.error}`);
+            } else if (data.batchStatus === 'ROLLBACK_PARTIAL_FAILURE') {
+                appendLog(`KRİTİK UYARI: Geri alma (Rollback) işlemi kısmen başarısız oldu! Bazı dosyalar yedekten geri yüklenemedi!`, 'error');
+                if (data.failedRestoreFiles && data.failedRestoreFiles.length > 0) {
+                    data.failedRestoreFiles.forEach(fr => {
+                        appendLog(`Kritik Dosya: ${fr.OriginalPath} - Hata: ${fr.Error} - Yedek Konumu: ${fr.BackupPath}`, 'error');
+                    });
+                }
+                alert(`KRİTİK HATA: Otomatik Geri Alma (Rollback) Kısmen Başarısız Oldu!\n\nYedek klasöründen manuel geri yükleme yapmanız gerekebilir.\n\nYedek Konumu: ${data.backupDirectory}\n\nHata: ${data.error}`);
             }
             if (data.logs) {
                 data.logs.forEach(l => {
+                    if (l.criticalRecovery) {
+                        appendLog(`ACİL MANUEL KURTARMA GEREKLİ: Orijinal dosya: ${l.criticalRecovery.originalExpectedPath} -> Kurtarma dosyası: ${l.criticalRecovery.recoveryFilePath}`, 'error');
+                        alert(`ACİL MANUEL KURTARMA GEREKİYOR!\n\nİki aşamalı kayıt sırasında beklenmeyen hata oluştu.\nOrijinal dosyanız silinmedi, şu isimle bekliyor:\n${l.criticalRecovery.recoveryFilePath}\n\nLütfen bu dosyanın adını orijinal adına çevirin.`);
+                    }
                     if (l.status === 'Error') {
                         appendLog(`✖ Hatalı Dosya: ${l.fileName} - ${l.details ? l.details.join(', ') : ''}`, 'error');
                     }
