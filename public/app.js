@@ -29,6 +29,7 @@ const chkQueries = document.getElementById('chkQueries');
 const chkConnections = document.getElementById('chkConnections');
 const chkVba = document.getElementById('chkVba');
 const chkAutoBackup = document.getElementById('chkAutoBackup');
+const chkAtomicBatch = document.getElementById('chkAtomicBatch');
 
 // Stats Counters
 const statTotalFiles = document.getElementById('statTotalFiles');
@@ -602,7 +603,8 @@ async function runUpdate() {
         updateQueries: chkQueries.checked,
         updateConnections: chkConnections.checked,
         updateVba: chkVba.checked,
-        autoBackup: chkAutoBackup.checked
+        autoBackup: chkAutoBackup.checked,
+        atomicBatch: chkAtomicBatch ? chkAtomicBatch.checked : true
     };
 
     try {
@@ -639,6 +641,17 @@ async function runUpdate() {
         } else {
             stopProgressPolling(`Güncelleme Hatayla Sonlandı!`);
             appendLog(`Hata: ${data.error}`, 'error');
+            if (data.batchStatus === 'ROLLED_BACK') {
+                appendLog(`GÜVENLİ İŞLEM: Hata nedeniyle yapılan tüm değişiklikler geri alındı (Rollback). Orijinal dosyalar korundu.`, 'warning');
+                alert(`İşlem Sırasında Hata Oluştu!\n\nVeri güvenliği gereği yapılan tüm değişiklikler otomatik olarak geri alındı (Rollback).\nOrijinal dosyalarınız korunmuştur.\n\nHata Detayı: ${data.error}`);
+            }
+            if (data.logs) {
+                data.logs.forEach(l => {
+                    if (l.status === 'Error') {
+                        appendLog(`✖ Hatalı Dosya: ${l.fileName} - ${l.details ? l.details.join(', ') : ''}`, 'error');
+                    }
+                });
+            }
         }
     } catch (err) {
         stopProgressPolling(`Bağlantı Hatası!`);

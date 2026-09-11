@@ -1,20 +1,23 @@
 @echo off
-chcp 65001 > nul
-title Excel SQL Connection & IP Updater
+title Excel SQL Server IP ve Baglanti Guncelleyici
+cd /d "%~dp0"
 
 echo =================================================================
 echo  Excel SQL Server IP ve Baglanti Dizesi Toplu Guncelleyici
 echo =================================================================
 echo.
-echo Sunucu baslatiliyor... Lutfen bekleyin.
+echo Sunucu baslatiliyor ve tarayici aciliyor... Lutfen bekleyin.
+echo (Kapatmak istediginizde bu pencereyi kapatabilirsiniz.)
 echo.
 
-start "" powershell.exe -ExecutionPolicy Bypass -File "%~dp0server.ps1" -Port 3005
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0server.ps1" -Port 3005
 
-timeout /t 2 /nobreak > nul
-start http://localhost:3005/
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo =================================================================
+    echo HATA: Sunucu baslatilamadi veya beklenmeyen bir hata ile sonlandi!
+    echo Hata Kodu: %ERRORLEVEL%
+    echo =================================================================
+    pause
+)
 
-echo.
-echo Uygulama tarayicinizda acildi: http://localhost:3005/
-echo Bu pencereyi kapatmayin. Kapatmak icin Ctrl+C basabilirsiniz.
-echo.

@@ -64,7 +64,7 @@ Bu araç ile belirttiğiniz klasördeki tüm Excel dosyaları sırayla taranır,
    git clone https://github.com/alperates58/excel-guncelleme.git
    ```
 2. Klasör içindeki **`BAŞLAT_Excel_Updater.bat`** dosyasına çift tıklayın.
-3. Otomatik olarak açılan tarayıcı ekranında (`http://localhost:3005`):
+3. Otomatik olarak açılan tarayıcı ekranında (`http://127.0.0.1:3005`):
    - **`Görsel Klasör Seçici (Gözat...)`** butonuna tıklayarak Excel dosyalarınızın bulunduğu klasörü seçin.
    - **`Klasörü Tara`** butonuna basın.
    - Tespit edilen eski IP'nin yanına yeni IP adresinizi yazın.

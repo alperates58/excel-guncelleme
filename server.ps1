@@ -28,9 +28,13 @@ try {
 }
 
 Write-Host "=================================================================" -ForegroundColor Green
-Write-Host " Excel Bulk Updater Server is running on http://localhost:$Port/" -ForegroundColor Cyan
-Write-Host " Open your browser to: http://localhost:$Port/ or http://127.0.0.1:$Port/" -ForegroundColor Yellow
+Write-Host " Excel Bulk Updater Server is running on http://127.0.0.1:$Port/" -ForegroundColor Cyan
+Write-Host " Open your browser to: http://127.0.0.1:$Port/" -ForegroundColor Yellow
 Write-Host "=================================================================" -ForegroundColor Green
+
+try {
+    Start-Process "http://127.0.0.1:$Port/"
+} catch { }
 
 $publicDir = Join-Path $PSScriptRoot "public"
 
