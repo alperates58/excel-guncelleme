@@ -386,28 +386,99 @@ function Scan-ExcelDirectory ($DirectoryPath) {
     }
 }
 
-function Create-ExcelBackup ($DirectoryPath) {
+function New-VerifiedBackup ([string]$SourcePath, [string]$BackupDir) {
+    if (-not (Test-Path $SourcePath)) {
+        return @{ Success = $false; Error = "Kaynak dosya bulunamadı: $SourcePath" }
+    }
+
+    try {
+        if (-not (Test-Path $BackupDir)) {
+            New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+        }
+
+        $sourceFile = Get-Item $SourcePath
+        $destPath = Join-Path $BackupDir $sourceFile.Name
+
+        Copy-FileWithShare $SourcePath $destPath
+
+        # Verification 1: File Exists
+        if (-not (Test-Path $destPath)) {
+            return @{ Success = $false; Error = "Yedek dosyası oluşturulamadı: $destPath" }
+        }
+
+        # Verification 2: Length
+        $destFile = Get-Item $destPath
+        if ($sourceFile.Length -ne $destFile.Length) {
+            if (Test-Path $destPath) { Remove-Item $destPath -Force }
+            return @{ Success = $false; Error = "Yedek dosya boyutu uyuşmuyor: Kaynak $($sourceFile.Length), Yedek $($destFile.Length)" }
+        }
+
+        # Verification 3: SHA256 cryptographic match
+        $srcHash = Get-FileSha256 $SourcePath
+        $dstHash = Get-FileSha256 $destPath
+        if ($srcHash -ne $dstHash) {
+            if (Test-Path $destPath) { Remove-Item $destPath -Force }
+            return @{ Success = $false; Error = "Yedek kriptografik hash doğrulaması başarısız oldu!" }
+        }
+
+        return @{
+            Success = $true
+            BackupPath = $destPath
+            Sha256 = $dstHash
+            Length = $destFile.Length
+        }
+    } catch {
+        return @{ Success = $false; Error = "Yedekleme hatası: $_" }
+    }
+}
+
+function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 
     $files = Get-ExcelFiles $DirectoryPath
     if ($files.Count -eq 0) {
-        return @{ success = $false; error = "No Excel files found to backup." }
+        return @{ success = $false; error = "Yedeklenecek Excel dosyası bulunamadı." }
     }
 
+    $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
     $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
-    $backupParent = Join-Path $env:TEMP "excel_backups"
-    $backupDir = Join-Path $backupParent "backup_$timestamp"
+    
+    # Store backup adjacent to selected directory: <DirectoryPath>_ExcelUpdater_Backups_<opId>
+    $parentPath = Split-Path -Parent $DirectoryPath
+    $folderName = Split-Path -Leaf $DirectoryPath
+    $backupDirName = "${folderName}_ExcelUpdater_Backups_${opId}"
+    $backupDir = if ($parentPath) { Join-Path $parentPath $backupDirName } else { Join-Path $DirectoryPath $backupDirName }
 
     try {
         if (-not (Test-Path $backupDir)) {
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
         }
+        
+        # Test write permission on backup dir
+        $testProbe = Join-Path $backupDir ".probe_$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [System.IO.File]::WriteAllText($testProbe, "probe")
+            Remove-Item $testProbe -Force
+        } catch {
+            return @{ success = $false; error = "Yedekleme klasörüne yazma izni bulunmuyor: $backupDir" }
+        }
+
         $backedUpCount = 0
+        $verifiedBackups = @()
 
         foreach ($file in $files) {
-            $destPath = Join-Path $backupDir $file.Name
-            Copy-FileWithShare $file.FullName $destPath
+            $bRes = New-VerifiedBackup -SourcePath $file.FullName -BackupDir $backupDir
+            if (-not $bRes.Success) {
+                # Clean up corrupted/partial backup directory
+                Remove-Item -Path $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+                return @{ success = $false; error = "Dosya yedeklenemedi ($($file.Name)): $($bRes.Error)" }
+            }
+            $verifiedBackups += @{
+                OriginalPath = $file.FullName
+                BackupPath = $bRes.BackupPath
+                Sha256 = $bRes.Sha256
+            }
             $backedUpCount++
         }
 
@@ -415,7 +486,9 @@ function Create-ExcelBackup ($DirectoryPath) {
             success = $true
             backupDirectory = $backupDir
             totalFiles = $backedUpCount
+            operationId = $opId
             timestamp = $timestamp
+            backups = $verifiedBackups
         }
     } catch {
         return @{ success = $false; error = "Backup failed: $_" }
