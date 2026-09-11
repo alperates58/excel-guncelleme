@@ -497,6 +497,92 @@ function Remove-StagingFile ([string]$StagingPath) {
     }
 }
 
+function New-IsolatedExcelInstance () {
+    $excel = New-Object -ComObject Excel.Application
+
+    # Detect exact PID
+    $excelPid = 0
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]'Win32ExcelNative').Type) {
+            Add-Type -TypeDefinition @"
+            using System;
+            using System.Runtime.InteropServices;
+            public class Win32ExcelNative {
+                [DllImport("user32.dll", SetLastError=true)]
+                public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            }
+"@
+        }
+        [uint32]$pidOut = 0
+        [Win32ExcelNative]::GetWindowThreadProcessId([IntPtr]$excel.Hwnd, [ref]$pidOut) | Out-Null
+        $excelPid = [int]$pidOut
+    } catch { }
+
+    # Capture original application properties to preserve them
+    $origCalc = -4105 # xlCalculationAutomatic default
+    try { $origCalc = $excel.Calculation } catch { }
+
+    $origCalcBeforeSave = $true
+    try { $origCalcBeforeSave = $excel.CalculateBeforeSave } catch { }
+
+    $origSecurity = 1 # msoAutomationSecurityByUI default
+    try { $origSecurity = $excel.AutomationSecurity } catch { }
+
+    # Apply strict automation isolation flags
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $excel.ScreenUpdating = $false
+    $excel.EnableEvents = $false
+    try { $excel.AskToUpdateLinks = $false } catch { }
+    try { $excel.AutomationSecurity = 3 } catch { } # 3 = msoAutomationSecurityForceDisable
+    try { $excel.Calculation = -4135 } catch { }    # -4135 = xlCalculationManual during staging
+    try { $excel.CalculateBeforeSave = $false } catch { }
+
+    return @{
+        App = $excel
+        Pid = $excelPid
+        OriginalCalculation = $origCalc
+        OriginalCalculateBeforeSave = $origCalcBeforeSave
+        OriginalAutomationSecurity = $origSecurity
+    }
+}
+
+function Restore-ExcelIsolation ($excelContext) {
+    if ($excelContext -and $excelContext.App) {
+        $app = $excelContext.App
+        try { $app.AutomationSecurity = $excelContext.OriginalAutomationSecurity } catch { }
+        try { $app.Calculation = $excelContext.OriginalCalculation } catch { }
+        try { $app.CalculateBeforeSave = $excelContext.OriginalCalculateBeforeSave } catch { }
+        try { $app.EnableEvents = $true } catch { }
+        try { $app.AskToUpdateLinks = $true } catch { }
+    }
+}
+
+function Close-IsolatedExcelInstance ($excelContext) {
+    if ($excelContext -and $excelContext.App) {
+        $app = $excelContext.App
+        try {
+            Restore-ExcelIsolation $excelContext
+            $app.Quit()
+        } catch { }
+        try {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null
+        } catch { }
+    }
+
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+
+    # Kill ONLY this isolated process if still hung after 1 second
+    if ($excelContext -and $excelContext.Pid -gt 0) {
+        Start-Sleep -Milliseconds 150
+        $p = Get-Process -Id $excelContext.Pid -ErrorAction SilentlyContinue
+        if ($p -and -not $p.HasExited) {
+            try { Stop-Process -Id $excelContext.Pid -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
 function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
