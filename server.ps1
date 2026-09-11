@@ -147,21 +147,26 @@ while ($listener.IsListening) {
 
         if ($path -eq "/api/open-folder" -and $request.HttpMethod -eq "POST") {
             $data = Read-RequestBody $request
-            $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
+            $rawDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
             
-            if (Test-Path $targetDir) {
-                Send-JsonResponse $response @{ success = $true; message = "Opening folder: $targetDir" }
-                
-                [System.Threading.Tasks.Task]::Run([Action]{
-                    try {
-                        Start-Process -FilePath "cmd.exe" -ArgumentList "/c start `"`" `"$targetDir`"" -WindowStyle Hidden
-                    } catch {
-                        try { Invoke-Item $targetDir } catch { }
-                    }
-                }) | Out-Null
-            } else {
-                Send-JsonResponse $response @{ success = $false; error = "Klasor bulunamadi: $targetDir" } 400
+            # Sanitize and validate directory path
+            if ([string]::IsNullOrWhiteSpace($rawDir) -or -not (Test-Path -LiteralPath $rawDir -PathType Container)) {
+                Send-JsonResponse $response @{ success = $false; error = "Klasor bulunamadi veya gecersiz: $rawDir" } 400
+                continue
             }
+
+            $resolvedDir = (Resolve-Path -LiteralPath $rawDir).Path
+            Send-JsonResponse $response @{ success = $true; message = "Opening folder: $resolvedDir" }
+            
+            [System.Threading.Tasks.Task]::Run([Action]{
+                try {
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = "explorer.exe"
+                    $psi.Arguments = "`"$resolvedDir`""
+                    $psi.UseShellExecute = $false
+                    [System.Diagnostics.Process]::Start($psi) | Out-Null
+                } catch { }
+            }) | Out-Null
             continue
         }
 
