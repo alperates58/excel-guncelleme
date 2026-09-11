@@ -16,6 +16,19 @@ if (Test-Path $engineScript) {
     exit 1
 }
 
+# Load Operation Manager functions
+$managerScript = Join-Path $PSScriptRoot "engine\operation_manager.ps1"
+if (Test-Path $managerScript) {
+    . $managerScript
+    try {
+        Recover-StaleOperations -RepoRoot $PSScriptRoot | Out-Null
+        Write-AuditLogEvent -OperationId "SERVER_STARTUP" -Level "INFO" -EventName "SERVER_INITIALIZED" -Message "Excel Bulk Updater server started on port $Port"
+    } catch { }
+} else {
+    Write-Error "Operation manager script not found at $managerScript"
+    exit 1
+}
+
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$Port/")
 $listener.Prefixes.Add("http://127.0.0.1:$Port/")
@@ -120,7 +133,136 @@ while ($listener.IsListening) {
         }
 
         if ($path -eq "/api/progress") {
+            if ($global:ActiveOperationId) {
+                $snap = Get-OperationSnapshot $global:ActiveOperationId
+                if ($snap) {
+                    $compatProgress = @{
+                        active = $true
+                        operationId = $snap.id
+                        type = $snap.type.ToLower()
+                        status = $snap.status
+                        currentFile = $snap.currentFile
+                        current = $snap.processedFiles
+                        total = $snap.totalFiles
+                        percent = $snap.progressPercent
+                        stage = $snap.currentStage
+                        canCancel = ($global:CANCELABLE_OPERATION_STATES -contains $snap.status)
+                    }
+                    Send-JsonResponse $response $compatProgress
+                    continue
+                }
+            }
             Send-JsonResponse $response $global:ProgressState
+            continue
+        }
+
+        # ----------------------------------------------------------------------
+        # OPERATION MANAGEMENT & ASYNC WORKER ENDPOINTS
+        # ----------------------------------------------------------------------
+        if ($path -eq "/api/operations/active" -and $request.HttpMethod -eq "GET") {
+            if ($global:ActiveOperationId) {
+                $snap = Get-OperationSnapshot $global:ActiveOperationId
+                Send-JsonResponse $response @{ active = $true; operation = $snap }
+            } else {
+                Send-JsonResponse $response @{ active = $false }
+            }
+            continue
+        }
+
+        if ($path -match "^/api/operations/([^/]+)/cancel$" -and $request.HttpMethod -eq "POST") {
+            $targetOpId = $Matches[1]
+            $cancelResult = Request-OperationCancellation -OperationId $targetOpId
+            Send-JsonResponse $response $cancelResult
+            continue
+        }
+
+        if ($path -match "^/api/operations/([^/]+)$" -and $request.HttpMethod -eq "GET") {
+            $targetOpId = $Matches[1]
+            $snap = Get-OperationSnapshot $targetOpId
+            if ($snap) {
+                Send-JsonResponse $response @{ success = $true; operation = $snap }
+            } else {
+                $histList = Get-OperationHistory -RepoRoot $PSScriptRoot
+                $found = $histList | Where-Object { $_.id -eq $targetOpId } | Select-Object -First 1
+                if ($found) {
+                    Send-JsonResponse $response @{ success = $true; operation = $found }
+                } else {
+                    Send-JsonResponse $response @{ success = $false; error = "İşlem bulunamadı: $targetOpId" } 404
+                }
+            }
+            continue
+        }
+
+        if ($path -eq "/api/history" -and $request.HttpMethod -eq "GET") {
+            $histList = Get-OperationHistory -RepoRoot $PSScriptRoot
+            Send-JsonResponse $response @{ success = $true; history = @($histList) }
+            continue
+        }
+
+        if ($path -eq "/api/diagnostics" -and $request.HttpMethod -eq "GET") {
+            $diag = Invoke-SystemDiagnostics -RepoRoot $PSScriptRoot
+            Send-JsonResponse $response $diag
+            continue
+        }
+
+        if ($path -eq "/api/backups" -and $request.HttpMethod -eq "GET") {
+            $dirQuery = $request.QueryString["dir"]
+            $targetDir = if (-not [string]::IsNullOrWhiteSpace($dirQuery)) { $dirQuery } else { (Get-Location).Path }
+
+            $backupsList = @()
+            if (Test-Path -LiteralPath $targetDir) {
+                $backupRootDir = Join-Path $targetDir "_ExcelUpdater_Backups"
+                if (Test-Path -LiteralPath $backupRootDir) {
+                    $manifests = Get-ChildItem -LiteralPath $backupRootDir -Filter "manifest.json" -Recurse -File -ErrorAction SilentlyContinue
+                    foreach ($m in $manifests) {
+                        try {
+                            $jsonContent = Get-Content -LiteralPath $m.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                            $bFolder = $m.Directory
+                            $backupsList += @{
+                                timestamp = $jsonContent.timestamp
+                                backupDirectory = $bFolder.FullName
+                                folderName = $bFolder.Name
+                                fileCount = if ($jsonContent.files) { @($jsonContent.files).Count } else { 0 }
+                                operation = $jsonContent.operation
+                            }
+                        } catch { }
+                    }
+                }
+            }
+            $sorted = $backupsList | Sort-Object { $_.timestamp } -Descending
+            Send-JsonResponse $response @{ success = $true; backups = @($sorted) }
+            continue
+        }
+
+        if ($path -eq "/api/restore" -and $request.HttpMethod -eq "POST") {
+            $data = Read-RequestBody $request
+            $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
+            $backupDir = if ($data -and $data.backupDir) { $data.backupDir } else { "" }
+
+            if ([string]::IsNullOrWhiteSpace($backupDir) -or -not (Test-Path -LiteralPath $backupDir)) {
+                Send-JsonResponse $response @{ success = $false; error = "Geçersiz veya bulunamayan yedek klasörü: $backupDir" } 400
+                continue
+            }
+
+            $manifestPath = Join-Path $backupDir "manifest.json"
+            if (-not (Test-Path -LiteralPath $manifestPath)) {
+                Send-JsonResponse $response @{ success = $false; error = "Yedek klasöründe manifest.json bulunamadı: $backupDir" } 400
+                continue
+            }
+
+            $reg = Register-Operation -Type "RESTORE" -Directory $targetDir -Options @{ backupDir = $backupDir }
+            if (-not $reg.success) {
+                Send-JsonResponse $response $reg 409
+                continue
+            }
+
+            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            Send-JsonResponse $response @{
+                success = $true
+                operationId = $reg.operationId
+                status = "QUEUED"
+                message = "Restore operation registered and queued"
+            } 202
             continue
         }
 
@@ -136,7 +278,6 @@ while ($listener.IsListening) {
                     Select-Object Name, FullName | 
                     ForEach-Object { @{ name = $_.Name; path = $_.FullName } }
 
-                # Check drives if root
                 $drives = @()
                 if ([string]::IsNullOrWhiteSpace($parentDir)) {
                     $drives = Get-PSDrive -PSProvider FileSystem | ForEach-Object { @{ name = "$($_.Name):\"; path = "$($_.Root)" } }
@@ -160,7 +301,6 @@ while ($listener.IsListening) {
             $data = Read-RequestBody $request
             $rawDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
             
-            # Sanitize and validate directory path
             if ([string]::IsNullOrWhiteSpace($rawDir) -or -not (Test-Path -LiteralPath $rawDir -PathType Container)) {
                 Send-JsonResponse $response @{ success = $false; error = "Klasor bulunamadi veya gecersiz: $rawDir" } 400
                 continue
@@ -184,6 +324,22 @@ while ($listener.IsListening) {
         if ($path -eq "/api/scan" -and $request.HttpMethod -eq "POST") {
             $data = Read-RequestBody $request
             $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
+
+            if ($data -and $data.async -eq $true) {
+                $reg = Register-Operation -Type "SCAN" -Directory $targetDir
+                if (-not $reg.success) {
+                    Send-JsonResponse $response $reg 409
+                    continue
+                }
+                Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+                Send-JsonResponse $response @{
+                    success = $true
+                    operationId = $reg.operationId
+                    status = "QUEUED"
+                    message = "Scan operation registered and queued"
+                } 202
+                continue
+            }
             
             $results = Scan-ExcelDirectory -DirectoryPath $targetDir
             Send-JsonResponse $response $results
@@ -199,14 +355,74 @@ while ($listener.IsListening) {
             continue
         }
 
+        if ($path -eq "/api/preview" -and $request.HttpMethod -eq "POST") {
+            $data = Read-RequestBody $request
+            $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
+            $rules = $data.rules
+            $options = $data.options
+
+            if ([string]::IsNullOrWhiteSpace($targetDir) -or -not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+                Send-JsonResponse $response @{ success = $false; error = "Hedef klasör bulunamadı: $targetDir" } 400
+                continue
+            }
+
+            if (-not $rules -or @($rules).Count -eq 0) {
+                Send-JsonResponse $response @{ success = $false; error = "En az bir kural belirtilmelidir." } 400
+                continue
+            }
+
+            $reg = Register-Operation -Type "PREVIEW" -Directory $targetDir -Rules $rules -Options $options
+            if (-not $reg.success) {
+                Send-JsonResponse $response $reg 409
+                continue
+            }
+
+            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            Send-JsonResponse $response @{
+                success = $true
+                operationId = $reg.operationId
+                status = "QUEUED"
+                message = "Preview operation registered and queued"
+            } 202
+            continue
+        }
+
         if ($path -eq "/api/update" -and $request.HttpMethod -eq "POST") {
             $data = Read-RequestBody $request
             $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
             $rules = $data.rules
             $options = $data.options
-            
-            $updateResult = Update-ExcelDirectory -DirectoryPath $targetDir -Rules $rules -Options $options
-            Send-JsonResponse $response $updateResult
+
+            if ([string]::IsNullOrWhiteSpace($targetDir) -or -not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+                Send-JsonResponse $response @{ success = $false; error = "Hedef klasör bulunamadı: $targetDir" } 400
+                continue
+            }
+
+            if (-not $rules -or @($rules).Count -eq 0) {
+                Send-JsonResponse $response @{ success = $false; error = "En az bir kural belirtilmelidir." } 400
+                continue
+            }
+
+            # Optional synchronous update if explicitly requested
+            if ($request.QueryString["sync"] -eq "true" -or ($data -and $data.sync -eq $true)) {
+                $updateResult = Update-ExcelDirectory -DirectoryPath $targetDir -Rules $rules -Options $options
+                Send-JsonResponse $response $updateResult
+                continue
+            }
+
+            $reg = Register-Operation -Type "UPDATE" -Directory $targetDir -Rules $rules -Options $options
+            if (-not $reg.success) {
+                Send-JsonResponse $response $reg 409
+                continue
+            }
+
+            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            Send-JsonResponse $response @{
+                success = $true
+                operationId = $reg.operationId
+                status = "QUEUED"
+                message = "Update operation registered and queued"
+            } 202
             continue
         }
 
