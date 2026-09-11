@@ -35,3 +35,6 @@ scratch/
 inspect_siparis.ps1
 test_folder.ps1
 test_picker_proc.ps1
+inspect_excels.ps1
+scan_all_samples.ps1
+test_com.ps1
