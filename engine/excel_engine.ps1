@@ -432,6 +432,71 @@ function New-VerifiedBackup ([string]$SourcePath, [string]$BackupDir) {
     }
 }
 
+function New-StagingFile ([string]$OriginalFilePath, [string]$OperationId = "") {
+    if (-not (Test-Path $OriginalFilePath)) {
+        return @{ Success = $false; Error = "Orijinal dosya bulunamadı: $OriginalFilePath" }
+    }
+
+    try {
+        $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
+        $file = Get-Item $OriginalFilePath
+        $stagingName = "." + $file.BaseName + "." + $opId + ".staging" + $file.Extension
+        $stagingPath = Join-Path $file.DirectoryName $stagingName
+
+        if (Test-Path $stagingPath) {
+            Remove-Item $stagingPath -Force -ErrorAction SilentlyContinue
+        }
+
+        # Safe byte copy to same directory
+        [System.IO.File]::Copy($OriginalFilePath, $stagingPath, $true)
+
+        # Verification 1: Exists
+        if (-not (Test-Path $stagingPath)) {
+            return @{ Success = $false; Error = "Staging kopyası oluşturulamadı: $stagingPath" }
+        }
+
+        # Verification 2: Length
+        $stagingFile = Get-Item $stagingPath
+        if ($file.Length -ne $stagingFile.Length) {
+            Remove-Item $stagingPath -Force -ErrorAction SilentlyContinue
+            return @{ Success = $false; Error = "Staging kopya boyutu uyuşmuyor: Orijinal $($file.Length), Staging $($stagingFile.Length)" }
+        }
+
+        # Verification 3: SHA256 integrity
+        $origHash = Get-FileSha256 $OriginalFilePath
+        $stageHash = Get-FileSha256 $stagingPath
+        if ($origHash -ne $stageHash) {
+            Remove-Item $stagingPath -Force -ErrorAction SilentlyContinue
+            return @{ Success = $false; Error = "Staging kopyasının hash doğrulaması başarısız oldu!" }
+        }
+
+        # Set hidden attribute to avoid polluting user explorer view
+        try {
+            $stagingFile.Attributes = [System.IO.FileAttributes]::Hidden
+        } catch { }
+
+        return @{
+            Success = $true
+            OriginalPath = $OriginalFilePath
+            StagingPath = $stagingPath
+            InitialHash = $origHash
+            OperationId = $opId
+        }
+    } catch {
+        return @{ Success = $false; Error = "Staging oluşturma hatası: $_" }
+    }
+}
+
+function Remove-StagingFile ([string]$StagingPath) {
+    if (-not [string]::IsNullOrWhiteSpace($StagingPath) -and (Test-Path $StagingPath)) {
+        try {
+            $f = Get-Item $StagingPath
+            $f.Attributes = [System.IO.FileAttributes]::Normal
+            Remove-Item $StagingPath -Force -ErrorAction SilentlyContinue
+        } catch { }
+    }
+}
+
 function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
