@@ -863,6 +863,10 @@ input[type="text"]:focus {
 .display-block { display: block; }
 .mb-1 { margin-bottom: 0.25rem; }
 .mb-2 { margin-bottom: 0.5rem; }
+.mb-3 { margin-bottom: 1rem; }
+.p-3 { padding: 1rem !important; }
+.ml-2 { margin-left: 0.5rem; }
+.ml-3 { margin-left: 0.75rem; }
 
 .hidden {
     display: none !important;
@@ -874,3 +878,283 @@ input[type="text"]:focus {
 
 .mt-2 { margin-top: 0.5rem; }
 .mt-3 { margin-top: 1rem; }
+
+/* -----------------------------------------------------------------------------
+   PHASE 3 NAVIGATION TABS
+   ----------------------------------------------------------------------------- */
+.nav-tabs {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 0.35rem 0.5rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-glass);
+}
+
+.nav-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.nav-tab:hover {
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.nav-tab.active {
+    color: #fff;
+    background: var(--secondary-gradient);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.tab-content {
+    animation: fadeIn 0.25s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* -----------------------------------------------------------------------------
+   PHASE 3 PROGRESS HEADER & CANCEL BUTTON
+   ----------------------------------------------------------------------------- */
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+}
+
+.progress-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.progress-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.btn-danger-sm {
+    padding: 0.3rem 0.75rem;
+    background: rgba(244, 63, 94, 0.15);
+    color: var(--accent-rose);
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-danger-sm:hover:not(:disabled) {
+    background: rgba(244, 63, 94, 0.3);
+    border-color: var(--accent-rose);
+    box-shadow: 0 0 10px rgba(244, 63, 94, 0.4);
+}
+
+.btn-danger-sm:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* -----------------------------------------------------------------------------
+   CONFIRMATION MODALS
+   ----------------------------------------------------------------------------- */
+.confirm-modal-content {
+    max-width: 600px;
+}
+
+.confirm-warning-text {
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--text-main);
+    margin-bottom: 1rem;
+}
+
+.confirm-summary-box {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    font-size: 0.9rem;
+}
+
+.confirm-summary-box code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    color: var(--primary);
+    word-break: break-all;
+}
+
+.confirm-rules-list {
+    margin: 0.3rem 0 0 1.2rem;
+    color: var(--text-muted);
+}
+
+.confirm-rules-list li {
+    margin-bottom: 0.25rem;
+}
+
+.confirm-badges {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.confirm-checklist {
+    padding: 0.75rem 0.5rem;
+    background: rgba(244, 63, 94, 0.08);
+    border: 1px solid rgba(244, 63, 94, 0.2);
+    border-radius: var(--radius-sm);
+}
+
+.confirm-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 1rem;
+}
+
+.btn-danger {
+    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+    color: white;
+    padding: 0.6rem 1.4rem;
+    border-radius: var(--radius-md);
+    border: none;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-danger:hover:not(:disabled) {
+    box-shadow: 0 0 16px rgba(244, 63, 94, 0.4);
+    transform: translateY(-1px);
+}
+
+.btn-danger:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* -----------------------------------------------------------------------------
+   ALERT & INFO BOXES
+   ----------------------------------------------------------------------------- */
+.alert-info-box {
+    display: flex;
+    gap: 0.8rem;
+    align-items: flex-start;
+    padding: 0.85rem 1rem;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: var(--radius-md);
+    color: var(--text-main);
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+.alert-info-box i {
+    color: var(--secondary);
+    font-size: 1.2rem;
+    margin-top: 0.1rem;
+}
+
+/* -----------------------------------------------------------------------------
+   DIAGNOSTICS GRID & CARDS
+   ----------------------------------------------------------------------------- */
+.diagnostics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.25rem;
+    padding: 1.25rem;
+}
+
+.diag-card {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.diag-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.diag-card-header h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.diag-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--primary);
+    font-size: 1.1rem;
+}
+
+.diag-card-body {
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.diag-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.diag-row:last-child {
+    border-bottom: none;
+}
+
+.diag-status-ok {
+    color: var(--accent-emerald);
+    font-weight: 600;
+}
+
+.diag-status-warn {
+    color: var(--accent-amber);
+    font-weight: 600;
+}
+
+.diag-status-err {
+    color: var(--accent-rose);
+    font-weight: 600;
+}
+
+.history-detail-modal-content {
+    max-width: 800px;
+}

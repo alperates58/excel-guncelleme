@@ -25,14 +25,31 @@
                     <p>Toplu SQL Server IP, Bağlantı Dizesi ve VBA Makro Güncelleyici</p>
                 </div>
             </div>
+
+            <!-- NAVIGATION TABS -->
+            <nav class="nav-tabs">
+                <button class="nav-tab active" data-tab="tabDashboard">
+                    <i class="fa-solid fa-gauge-high"></i> Dashboard
+                </button>
+                <button class="nav-tab" data-tab="tabHistory" id="tabBtnHistory">
+                    <i class="fa-solid fa-clock-rotate-left"></i> İşlem Geçmişi
+                </button>
+                <button class="nav-tab" data-tab="tabBackups" id="tabBtnBackups">
+                    <i class="fa-solid fa-shield-halved"></i> Yedekler & Kurtarma
+                </button>
+                <button class="nav-tab" data-tab="tabDiagnostics" id="tabBtnDiagnostics">
+                    <i class="fa-solid fa-stethoscope"></i> Sistem Durumu
+                </button>
+            </nav>
+
             <div class="server-status" id="serverStatus">
                 <span class="status-dot pulsing"></span>
                 <span class="status-text">Sunucu Durumu: Bağlanıyor...</span>
             </div>
         </header>
 
-        <!-- MAIN CONTENT LAYOUT -->
-        <main class="main-layout">
+        <!-- MAIN CONTENT LAYOUT (TAB 1: DASHBOARD) -->
+        <main class="main-layout tab-content" id="tabDashboard">
             
             <!-- LEFT PANEL: CONFIG & CONTROLS -->
             <aside class="control-panel">
@@ -138,10 +155,15 @@
                             </label>
                         </div>
 
-                        <!-- EXECUTE BUTTON -->
-                        <button id="btnExecuteUpdate" class="btn btn-gradient btn-block btn-lg mt-3">
-                            <i class="fa-solid fa-bolt"></i> Toplu Güncellemeyi Başlat
-                        </button>
+                        <!-- PREVIEW AND EXECUTE BUTTONS -->
+                        <div class="action-buttons-stack mt-3">
+                            <button id="btnPreviewUpdate" class="btn btn-secondary btn-block btn-lg">
+                                <i class="fa-solid fa-eye"></i> Önizlemeyi Başlat (Dry Run)
+                            </button>
+                            <button id="btnExecuteUpdate" class="btn btn-gradient btn-block btn-lg mt-2">
+                                <i class="fa-solid fa-bolt"></i> Toplu Güncellemeyi Başlat
+                            </button>
+                        </div>
                     </div>
                 </div>
             </aside>
@@ -180,11 +202,20 @@
                     </div>
                 </div>
 
-                <!-- PROGRESS BAR (HIDDEN BY DEFAULT) -->
+                <!-- PROGRESS BAR WITH STAGE BADGE AND CANCEL BUTTON -->
                 <div id="progressSection" class="card glass-card progress-card hidden">
                     <div class="progress-header">
-                        <span id="progressStatusText">İşlem Yapılıyor...</span>
-                        <span id="progressPercent">0%</span>
+                        <div class="progress-header-left">
+                            <span class="status-dot pulsing" id="progressDot"></span>
+                            <span id="progressStatusText">İşlem Yapılıyor...</span>
+                            <span class="badge badge-info ml-2" id="progressStageBadge">Hazırlanıyor</span>
+                        </div>
+                        <div class="progress-header-right">
+                            <span id="progressPercent">0%</span>
+                            <button id="btnCancelOperation" class="btn btn-danger-sm ml-3" title="İşlemi İptal Et">
+                                <i class="fa-solid fa-ban"></i> İptal Et
+                            </button>
+                        </div>
                     </div>
                     <div class="progress-bar-container">
                         <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
@@ -256,6 +287,168 @@
 
             </section>
         </main>
+
+        <!-- ================================================================== -->
+        <!-- TAB 2: OPERATION HISTORY                                           -->
+        <!-- ================================================================== -->
+        <section class="tab-content hidden" id="tabHistory">
+            <div class="card glass-card">
+                <div class="card-header table-header">
+                    <div class="header-title">
+                        <i class="fa-solid fa-clock-rotate-left"></i>
+                        <h2>Kalıcı İşlem Geçmişi (Audit History)</h2>
+                    </div>
+                    <div class="table-actions">
+                        <button id="btnRefreshHistory" class="btn btn-secondary btn-sm">
+                            <i class="fa-solid fa-rotate"></i> Yenile
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="custom-table" id="historyTable">
+                            <thead>
+                                <tr>
+                                    <th>İşlem ID</th>
+                                    <th>Tarih / Saat</th>
+                                    <th>Tür</th>
+                                    <th>Hedef Klasör</th>
+                                    <th>İşlenen / Değişen</th>
+                                    <th>Süre</th>
+                                    <th>Durum</th>
+                                    <th>Aksiyon</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyTableBody">
+                                <tr class="empty-row">
+                                    <td colspan="8">
+                                        <div class="empty-state">
+                                            <i class="fa-solid fa-inbox empty-icon"></i>
+                                            <p>Henüz kayıtlı bir geçmiş işlem bulunmuyor.</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================================================================== -->
+        <!-- TAB 3: BACKUPS & RESTORE                                           -->
+        <!-- ================================================================== -->
+        <section class="tab-content hidden" id="tabBackups">
+            <div class="card glass-card">
+                <div class="card-header table-header">
+                    <div class="header-title">
+                        <i class="fa-solid fa-shield-halved"></i>
+                        <h2>Yedek Arşivleri ve Doğrulanmış Geri Yükleme (Restore)</h2>
+                    </div>
+                    <div class="table-actions">
+                        <button id="btnRefreshBackups" class="btn btn-secondary btn-sm">
+                            <i class="fa-solid fa-rotate"></i> Yenile
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="p-3">
+                        <div class="alert-info-box mb-3">
+                            <i class="fa-solid fa-circle-info"></i>
+                            <div>
+                                <strong>Doğrulanmış Geri Yükleme (Verified Restore):</strong> Seçilen yedek klasöründeki her dosya, orijinal SHA256 manifest özetiyle doğrulanarak geri yüklenir. Geri yükleme işleminden önce otomatik olarak anlık kurtarma yedeği alınır.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="custom-table" id="backupsTable">
+                            <thead>
+                                <tr>
+                                    <th>Yedekleme Zamanı</th>
+                                    <th>Yedek Klasörü</th>
+                                    <th>Dosya Sayısı</th>
+                                    <th>İşlem Türü</th>
+                                    <th>Aksiyon</th>
+                                </tr>
+                            </thead>
+                            <tbody id="backupsTableBody">
+                                <tr class="empty-row">
+                                    <td colspan="5">
+                                        <div class="empty-state">
+                                            <i class="fa-solid fa-box-archive empty-icon"></i>
+                                            <p>Seçili klasörde henüz oluşturulmuş yedek bulunamadı.</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================================================================== -->
+        <!-- TAB 4: SYSTEM DIAGNOSTICS                                          -->
+        <!-- ================================================================== -->
+        <section class="tab-content hidden" id="tabDiagnostics">
+            <div class="card glass-card">
+                <div class="card-header table-header">
+                    <div class="header-title">
+                        <i class="fa-solid fa-stethoscope"></i>
+                        <h2>Sistem Durumu ve Sağlık Denetimi (Diagnostics)</h2>
+                    </div>
+                    <div class="table-actions">
+                        <button id="btnRunDiagnostics" class="btn btn-primary btn-sm">
+                            <i class="fa-solid fa-heart-pulse"></i> Sağlık Kontrolünü Çalıştır
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="diagnostics-grid" id="diagnosticsGrid">
+                        <div class="diag-card">
+                            <div class="diag-card-header">
+                                <span class="diag-icon" id="diagExcelIcon"><i class="fa-solid fa-file-excel"></i></span>
+                                <h4>Excel COM Otomasyonu</h4>
+                            </div>
+                            <div class="diag-card-body" id="diagExcelBody">
+                                <p class="text-dim">Henüz kontrol edilmedi.</p>
+                            </div>
+                        </div>
+
+                        <div class="diag-card">
+                            <div class="diag-card-header">
+                                <span class="diag-icon" id="diagDiskIcon"><i class="fa-solid fa-hard-drive"></i></span>
+                                <h4>Disk & İzin Denetimi</h4>
+                            </div>
+                            <div class="diag-card-body" id="diagDiskBody">
+                                <p class="text-dim">Henüz kontrol edilmedi.</p>
+                            </div>
+                        </div>
+
+                        <div class="diag-card">
+                            <div class="diag-card-header">
+                                <span class="diag-icon" id="diagProcIcon"><i class="fa-solid fa-microchip"></i></span>
+                                <h4>Aktif Excel Süreçleri</h4>
+                            </div>
+                            <div class="diag-card-body" id="diagProcBody">
+                                <p class="text-dim">Henüz kontrol edilmedi.</p>
+                            </div>
+                        </div>
+
+                        <div class="diag-card">
+                            <div class="diag-card-header">
+                                <span class="diag-icon" id="diagQueueIcon"><i class="fa-solid fa-list-check"></i></span>
+                                <h4>İşlem Kuyruğu & Kilitler</h4>
+                            </div>
+                            <div class="diag-card-body" id="diagQueueBody">
+                                <p class="text-dim">Henüz kontrol edilmedi.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </div>
 
     <!-- FOLDER BROWSER MODAL -->
@@ -312,6 +505,81 @@
             </div>
             <div class="modal-body" id="modalBody">
                 <!-- Dynamic Content Loaded by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- UPDATE CONFIRMATION MODAL -->
+    <div id="confirmationModal" class="modal">
+        <div class="modal-content glass-card confirm-modal-content">
+            <div class="modal-header">
+                <h3 class="text-warning"><i class="fa-solid fa-triangle-exclamation"></i> Toplu Güncelleme Öncesi Onay</h3>
+                <button class="modal-close" id="btnConfirmClose">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-warning-text">Bu işlem hedef klasördeki Excel dosyaları üzerinde kalıcı güncellemeler yapacaktır. Lütfen parametreleri kontrol edin:</p>
+                
+                <div class="confirm-summary-box">
+                    <div><strong>Hedef Klasör:</strong> <code id="confirmTargetDir">...</code></div>
+                    <div><strong>Taranan / Hedef Dosya:</strong> <span id="confirmFileCount">0</span> dosya</div>
+                    <div><strong>Uygulanacak Kurallar:</strong></div>
+                    <ul id="confirmRulesList" class="confirm-rules-list"></ul>
+                    <div class="confirm-badges mt-2">
+                        <span id="confirmBackupBadge" class="badge badge-success"><i class="fa-solid fa-shield"></i> Otomatik Yedek Açık</span>
+                        <span id="confirmRollbackBadge" class="badge badge-success"><i class="fa-solid fa-rotate-left"></i> Atomik Rollback Devrede</span>
+                    </div>
+                </div>
+
+                <div class="confirm-checklist mt-3">
+                    <label class="checkbox-container">
+                        <input type="checkbox" id="chkConfirmRisks">
+                        <span class="checkmark"></span>
+                        Yukarıdaki kuralları ve işlem detaylarını kontrol ettim, güncellemeyi onaylıyorum.
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer confirm-footer">
+                <button id="btnCancelConfirm" class="btn btn-secondary">Vazgeç</button>
+                <button id="btnProceedUpdate" class="btn btn-danger" disabled>
+                    <i class="fa-solid fa-bolt"></i> Onaylıyorum ve Başlat
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- RESTORE CONFIRMATION MODAL -->
+    <div id="restoreConfirmModal" class="modal">
+        <div class="modal-content glass-card confirm-modal-content">
+            <div class="modal-header">
+                <h3 class="text-warning"><i class="fa-solid fa-rotate-left"></i> Yedekten Geri Yükleme Onayı</h3>
+                <button class="modal-close" id="btnRestoreClose">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-warning-text">Seçilen yedekten dosyalar orijinal konumlarına geri yazılacaktır. Geri yükleme başlamadan önce mevcut dosyaların anlık kurtarma yedeği otomatik olarak alınacaktır.</p>
+                
+                <div class="confirm-summary-box">
+                    <div><strong>Geri Yüklenecek Yedek:</strong> <code id="restoreBackupDirText">...</code></div>
+                    <div><strong>Hedef Klasör:</strong> <code id="restoreTargetDirText">...</code></div>
+                </div>
+            </div>
+            <div class="modal-footer confirm-footer">
+                <button id="btnCancelRestore" class="btn btn-secondary">Vazgeç</button>
+                <button id="btnProceedRestore" class="btn btn-danger">
+                    <i class="fa-solid fa-rotate-left"></i> Geri Yüklemeyi Başlat
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- HISTORY DETAIL MODAL -->
+    <div id="historyDetailModal" class="modal">
+        <div class="modal-content glass-card history-detail-modal-content">
+            <div class="modal-header">
+                <h3 id="historyDetailTitle"><i class="fa-solid fa-file-lines"></i> İşlem Raporu & Logları</h3>
+                <button class="modal-close" id="btnHistoryDetailClose">&times;</button>
+            </div>
+            <div class="modal-body" id="historyDetailBody">
+                <!-- Dynamic Content -->
             </div>
         </div>
     </div>
