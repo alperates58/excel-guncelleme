@@ -15,6 +15,10 @@
 # Backups & Temporary files
 backup_*
 excel_backups/
+*_ExcelUpdater_Backups*
+*.staging.*
+*.old
+tests/work/
 *.log
 *.tmp
 
