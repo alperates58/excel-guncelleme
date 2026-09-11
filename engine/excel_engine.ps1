@@ -1657,3 +1657,266 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
         backupDirectory = $backupDir
     }
 }
+
+function Preview-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]$OperationId = "") {
+    $files = Get-ExcelFiles $DirectoryPath
+    $totalCount = $files.Count
+    
+    if ($totalCount -eq 0) {
+        return @{
+            Success = $true
+            TotalFiles = 0
+            MatchingFiles = 0
+            TotalReplacements = 0
+            Files = @()
+            Warnings = @()
+        }
+    }
+
+    $ruleValidation = Test-ReplacementRulesValid $Rules
+    if (-not $ruleValidation.IsValid) {
+        return @{
+            Success = $false
+            Error = "Rule validation failed: $($ruleValidation.Error)"
+            TotalFiles = $totalCount
+            MatchingFiles = 0
+            TotalReplacements = 0
+            Files = @()
+            Warnings = @()
+        }
+    }
+    $validRules = $ruleValidation.Rules
+
+    $iso = $null
+    try {
+        $iso = New-IsolatedExcelInstance
+    } catch {
+        return @{
+            Success = $false
+            Error = "Could not initialize isolated Excel instance: $_"
+            TotalFiles = $totalCount
+            MatchingFiles = 0
+            TotalReplacements = 0
+            Files = @()
+            Warnings = @()
+        }
+    }
+
+    $excel = $iso.Excel
+    $previewFiles = @()
+    $totalMatchingFiles = 0
+    $overallReplacements = 0
+    $globalWarnings = @()
+    $processedCount = 0
+
+    $checkQueries = if ($Options -and $Options.updateQueries -ne $null) { $Options.updateQueries } else { $true }
+    $checkConnections = if ($Options -and $Options.updateConnections -ne $null) { $Options.updateConnections } else { $true }
+    $checkVba = if ($Options -and $Options.updateVba -ne $null) { $Options.updateVba } else { $true }
+
+    try {
+        foreach ($file in $files) {
+            $processedCount++
+            if (-not [string]::IsNullOrWhiteSpace($OperationId)) {
+                if (Get-Command "Calculate-WeightedProgress" -ErrorAction SilentlyContinue) {
+                    $pct = Calculate-WeightedProgress -TotalFiles $totalCount -CompletedFiles ($processedCount - 1) -CurrentFileStage "Excel Update"
+                    if (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue) {
+                        Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile $file.Name -CurrentStage "Previewing" -ProgressPercent $pct
+                    }
+                }
+            }
+
+            $fSha = Get-FileSha256 $file.FullName
+            $fWritable = Test-FileWritable $file.FullName
+
+            $fPreview = @{
+                fileName = $file.Name
+                filePath = $file.FullName
+                fileSha256 = $fSha
+                isWritable = $fWritable
+                extension = $file.Extension.ToLower()
+                sizeBytes = $file.Length
+                queryMatches = 0
+                connectionMatches = 0
+                vbaMatches = 0
+                totalReplacements = 0
+                details = @()
+                warnings = @()
+            }
+
+            if (-not $fWritable) {
+                $fPreview.warnings += "Dosya kilitli veya salt-okunur."
+            }
+
+            $wb = $null
+            try {
+                # Strictly READ-ONLY open with UpdateLinks = 0
+                $wb = $excel.Workbooks.Open($file.FullName, 0, $true)
+
+                # 1. Power Queries Simulation
+                if ($checkQueries) {
+                    try {
+                        if ($wb.Queries) {
+                            $queries = $wb.Queries
+                            $qCount = $queries.Count
+                            for ($qIdx = 1; $qIdx -le $qCount; $qIdx++) {
+                                $q = $queries.Item($qIdx)
+                                if ($q) {
+                                    $formula = $q.Formula
+                                    if ($formula) {
+                                        $rep = Invoke-SafeReplacement -InputText $formula -Rules $validRules
+                                        if ($rep.MatchCount -gt 0) {
+                                            $fPreview.queryMatches += $rep.MatchCount
+                                            $fPreview.totalReplacements += $rep.MatchCount
+                                            $fPreview.details += "PowerQuery '$($q.Name)': $($rep.MatchCount) eşleşme"
+                                        }
+                                    }
+                                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($q) | Out-Null
+                                }
+                            }
+                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($queries) | Out-Null
+                        }
+                    } catch { }
+                }
+
+                # 2. Connections Simulation
+                if ($checkConnections) {
+                    try {
+                        if ($wb.Connections) {
+                            $conns = $wb.Connections
+                            $cCount = $conns.Count
+                            for ($cIdx = 1; $cIdx -le $cCount; $cIdx++) {
+                                $conn = $conns.Item($cIdx)
+                                if ($conn) {
+                                    if ($conn.OLEDBConnection) {
+                                        try {
+                                            $cStr = $conn.OLEDBConnection.ConnectionString
+                                            if ($cStr) {
+                                                $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
+                                                if ($rep.MatchCount -gt 0) {
+                                                    $fPreview.connectionMatches += $rep.MatchCount
+                                                    $fPreview.totalReplacements += $rep.MatchCount
+                                                    $fPreview.details += "OLEDB ConnStr in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                }
+                                            }
+                                            $cmd = $conn.OLEDBConnection.CommandText
+                                            if ($cmd) {
+                                                $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
+                                                if ($rep.MatchCount -gt 0) {
+                                                    $fPreview.connectionMatches += $rep.MatchCount
+                                                    $fPreview.totalReplacements += $rep.MatchCount
+                                                    $fPreview.details += "OLEDB CommandText in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                }
+                                            }
+                                        } catch { }
+                                    }
+                                    if ($conn.ODBCConnection) {
+                                        try {
+                                            $cStr = $conn.ODBCConnection.ConnectionString
+                                            if ($cStr) {
+                                                $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
+                                                if ($rep.MatchCount -gt 0) {
+                                                    $fPreview.connectionMatches += $rep.MatchCount
+                                                    $fPreview.totalReplacements += $rep.MatchCount
+                                                    $fPreview.details += "ODBC ConnStr in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                }
+                                            }
+                                            $cmd = $conn.ODBCConnection.CommandText
+                                            if ($cmd) {
+                                                $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
+                                                if ($rep.MatchCount -gt 0) {
+                                                    $fPreview.connectionMatches += $rep.MatchCount
+                                                    $fPreview.totalReplacements += $rep.MatchCount
+                                                    $fPreview.details += "ODBC CommandText in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                }
+                                            }
+                                        } catch { }
+                                    }
+                                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($conn) | Out-Null
+                                }
+                            }
+                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($conns) | Out-Null
+                        }
+                    } catch { }
+                }
+
+                # 3. VBA Macros Simulation
+                if ($checkVba -and ($file.Extension.ToLower() -in @(".xlsm", ".xlsb"))) {
+                    try {
+                        $vbProj = $wb.VBProject
+                        if ($vbProj) {
+                            $isSigned = $false
+                            try { if ($vbProj.Signature) { $isSigned = $true } } catch { }
+                            if ($isSigned) {
+                                $fPreview.warnings += "VBA Projesi dijital imzalı (imzanın bozulmaması için atlanacak)."
+                            } elseif ($vbProj.Protection -eq 1) {
+                                $fPreview.warnings += "VBA Projesi şifre korumalı / kilitli (atlanacak)."
+                            } else {
+                                $comps = $vbProj.VBComponents
+                                if ($comps) {
+                                    $cCount = $comps.Count
+                                    for ($cIdx = 1; $cIdx -le $cCount; $cIdx++) {
+                                        $comp = $comps.Item($cIdx)
+                                        if ($comp) {
+                                            $cm = $comp.CodeModule
+                                            if ($cm -and $cm.CountOfLines -gt 0) {
+                                                $lineCount = $cm.CountOfLines
+                                                for ($l = 1; $l -le $lineCount; $l++) {
+                                                    $line = $cm.Lines($l, 1)
+                                                    $rep = Invoke-SafeReplacement -InputText $line -Rules $validRules
+                                                    if ($rep.MatchCount -gt 0) {
+                                                        $fPreview.vbaMatches += $rep.MatchCount
+                                                        $fPreview.totalReplacements += $rep.MatchCount
+                                                        $fPreview.details += "VBA Line $l in '$($comp.Name)': $($rep.MatchCount) eşleşme"
+                                                    }
+                                                }
+                                            }
+                                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($comp) | Out-Null
+                                        }
+                                    }
+                                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($comps) | Out-Null
+                                }
+                            }
+                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($vbProj) | Out-Null
+                        }
+                    } catch {
+                        $fPreview.warnings += "VBA erişim uyarısı: $_"
+                    }
+                }
+
+                # Close strictly without saving!
+                $wb.Close($false)
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($wb) | Out-Null
+                $wb = $null
+
+            } catch {
+                $fPreview.warnings += "Dosya okuma hatası: $_"
+                if ($wb) {
+                    try { $wb.Close($false) } catch { }
+                    try { [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($wb) | Out-Null } catch { }
+                    $wb = $null
+                }
+            }
+
+            if ($fPreview.totalReplacements -gt 0) {
+                $totalMatchingFiles++
+                $overallReplacements += $fPreview.totalReplacements
+            }
+
+            $previewFiles += $fPreview
+        }
+    } finally {
+        if ($iso) {
+            Close-IsolatedExcelInstance $iso
+            $iso = $null
+        }
+    }
+
+    return @{
+        Success = $true
+        TotalFiles = $totalCount
+        MatchingFiles = $totalMatchingFiles
+        TotalReplacements = $overallReplacements
+        Files = $previewFiles
+        Warnings = $globalWarnings
+    }
+}

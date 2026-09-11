@@ -91,7 +91,7 @@ if (Get-Command "Register-Operation" -ErrorAction SilentlyContinue) {
     Assert-Equal $snap1.status "QUEUED" "Initial status must be QUEUED"
 
     # Mutate through central mutator
-    Set-OperationStatus $testOpId "RUNNING" "Preflight"
+    $null = Set-OperationStatus $testOpId "RUNNING" "Preflight"
     $snap2 = Get-OperationSnapshot $testOpId
     Assert-Equal $snap2.status "RUNNING" "Status must transition to RUNNING"
     Assert-Equal $snap2.currentStage "Preflight" "CurrentStage must be Preflight"
@@ -108,14 +108,14 @@ if (Get-Command "Register-Operation" -ErrorAction SilentlyContinue) {
 }
 
 # ------------------------------------------------------------------------------
-# 4. Single-Active COM Operation Mutex & 409 Conflict Tests
+# 4. Concurrency Mutex & 409 Rejection Tests
 # ------------------------------------------------------------------------------
 Write-Host "`n-- [TEST 4] Concurrency Mutex & 409 Rejection --" -ForegroundColor Yellow
 
 if (Get-Command "Register-Operation" -ErrorAction SilentlyContinue) {
     Reset-OperationRegistry
     $op1 = Register-Operation -Type "UPDATE" -Directory "C:\Temp\Test1"
-    Set-OperationStatus $op1.OperationId "RUNNING" "Excel Update"
+    $null = Set-OperationStatus $op1.OperationId "RUNNING" "Excel Update"
 
     # Attempt to register second heavy operation while op1 is RUNNING
     $op2 = Register-Operation -Type "UPDATE" -Directory "C:\Temp\Test2"
@@ -124,7 +124,7 @@ if (Get-Command "Register-Operation" -ErrorAction SilentlyContinue) {
     Assert-Equal $op2.ActiveOperationId $op1.OperationId "ActiveOperationId must reference op1"
 
     # Finish op1
-    Set-OperationStatus $op1.OperationId "COMPLETED" "Done"
+    $null = Set-OperationStatus $op1.OperationId "COMPLETED" "Done"
     
     # Now second operation should succeed
     $op3 = Register-Operation -Type "UPDATE" -Directory "C:\Temp\Test3"
@@ -174,7 +174,7 @@ if (Get-Command "Save-OperationHistory" -ErrorAction SilentlyContinue) {
     # Test Corrupt File Recovery
     [System.IO.File]::WriteAllText($histFile, "THIS IS CORRUPTED JSON {{{")
     $corruptRecoverList = Get-OperationHistory -HistoryFilePath $histFile
-    Assert-True ($corruptRecoverList -ne $null) "Corrupt history should not throw and return safe list"
+    Assert-True ($corruptRecoverList -is [array]) "Corrupt history should not throw and return safe array"
     Assert-True (Get-ChildItem $testHistoryDir -Filter "history.corrupt.*.json").Count -gt 0 "Corrupted history must be preserved with .corrupt extension"
 
     Remove-Item $testHistoryDir -Recurse -Force

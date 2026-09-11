@@ -1,0 +1,727 @@
+# ==============================================================================
+# Excel SQL Connect Pro - Operation Manager & State Machine Engine
+# ==============================================================================
+
+# Ensure concurrent collection types are available
+$null = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]
+
+# Global synchronization locks
+$global:OperationRegistryLock = [object]::new()
+$global:HistoryFileLock = [object]::new()
+$global:AuditLogLock = [object]::new()
+
+# Global in-memory registry for operation states
+if ($null -eq $global:OperationsRegistry) {
+    $global:OperationsRegistry = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+}
+
+# ------------------------------------------------------------------------------
+# 1. State Machine Catalog & Transition Validator
+# ------------------------------------------------------------------------------
+$global:VALID_OPERATION_STATES = @(
+    "QUEUED",
+    "RUNNING",
+    "CANCELLATION_REQUESTED",
+    "COMMITTING",
+    "ROLLING_BACK",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "ROLLBACK_PARTIAL_FAILURE",
+    "CRITICAL_MANUAL_RECOVERY_REQUIRED",
+    "STALE_INTERRUPTED"
+)
+
+$global:TERMINAL_OPERATION_STATES = @(
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "ROLLBACK_PARTIAL_FAILURE",
+    "CRITICAL_MANUAL_RECOVERY_REQUIRED",
+    "STALE_INTERRUPTED"
+)
+
+function Test-ValidStateTransition ([string]$FromState, [string]$ToState) {
+    if ([string]::IsNullOrWhiteSpace($FromState) -or [string]::IsNullOrWhiteSpace($ToState)) {
+        return $false
+    }
+
+    if ($FromState -eq $ToState) {
+        return $true
+    }
+
+    # Terminal states can NEVER transition to any other state
+    if ($global:TERMINAL_OPERATION_STATES -contains $FromState) {
+        return $false
+    }
+
+    switch ($FromState) {
+        "QUEUED" {
+            return ($ToState -in @("RUNNING", "FAILED", "CANCELLED", "STALE_INTERRUPTED"))
+        }
+        "RUNNING" {
+            return ($ToState -in @(
+                "CANCELLATION_REQUESTED",
+                "COMMITTING",
+                "ROLLING_BACK",
+                "COMPLETED",
+                "FAILED",
+                "CANCELLED",
+                "CRITICAL_MANUAL_RECOVERY_REQUIRED",
+                "STALE_INTERRUPTED"
+            ))
+        }
+        "CANCELLATION_REQUESTED" {
+            return ($ToState -in @(
+                "COMMITTING", # If commit was already in progress
+                "ROLLING_BACK",
+                "CANCELLED",
+                "FAILED",
+                "ROLLBACK_PARTIAL_FAILURE",
+                "STALE_INTERRUPTED"
+            ))
+        }
+        "COMMITTING" {
+            return ($ToState -in @(
+                "RUNNING", # Next file in batch
+                "COMPLETED",
+                "ROLLING_BACK",
+                "FAILED",
+                "CRITICAL_MANUAL_RECOVERY_REQUIRED",
+                "STALE_INTERRUPTED"
+            ))
+        }
+        "ROLLING_BACK" {
+            return ($ToState -in @(
+                "CANCELLED",
+                "FAILED",
+                "ROLLBACK_PARTIAL_FAILURE",
+                "CRITICAL_MANUAL_RECOVERY_REQUIRED",
+                "STALE_INTERRUPTED"
+            ))
+        }
+        default {
+            return $false
+        }
+    }
+}
+
+function Assert-ValidStateTransition ([string]$FromState, [string]$ToState) {
+    if (-not (Test-ValidStateTransition $FromState $ToState)) {
+        throw "Invalid operation state transition from '$FromState' to '$ToState'."
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 2. Sensitive Data & Credential Masking (Fail-Closed)
+# ------------------------------------------------------------------------------
+function Protect-SensitiveData ($InputData) {
+    if ($null -eq $InputData) { return $null }
+
+    # Masking regex rules
+    $maskPatterns = @(
+        @{ Pattern = '(?i)(Password|Pwd)\s*=\s*[^;\r\n"]+'; Replace = '$1=***' },
+        @{ Pattern = '(?i)(User Id|Uid)\s*=\s*[^;\r\n"]+';  Replace = '$1=***' },
+        @{ Pattern = '(?i)(Bearer\s+)[A-Za-z0-9_\-\.]+';     Replace = '$1***' },
+        @{ Pattern = '(?i)(token=)[A-Za-z0-9_\-\.]+';       Replace = '$1***' }
+    )
+
+    if ($InputData -is [string]) {
+        $result = $InputData
+        foreach ($rule in $maskPatterns) {
+            $result = [regex]::Replace($result, $rule.Pattern, $rule.Replace)
+        }
+        return $result
+    }
+
+    if ($InputData -is [System.Collections.IDictionary] -or $InputData -is [hashtable]) {
+        $cleanHt = @{}
+        foreach ($k in $InputData.Keys) {
+            $val = $InputData[$k]
+            $cleanHt[$k] = Protect-SensitiveData $val
+        }
+        return $cleanHt
+    }
+
+    if ($InputData -is [System.Collections.IEnumerable] -and -not ($InputData -is [string])) {
+        $cleanList = @()
+        foreach ($item in $InputData) {
+            $cleanList += Protect-SensitiveData $item
+        }
+        return $cleanList
+    }
+
+    if ($InputData -is [System.Exception]) {
+        return Protect-SensitiveData $InputData.Message
+    }
+
+    return $InputData
+}
+
+# ------------------------------------------------------------------------------
+# 3. Thread-Safe Operation Registry
+# ------------------------------------------------------------------------------
+function Reset-OperationRegistry () {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        $global:OperationsRegistry.Clear()
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function New-OperationId () {
+    $ts = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+    $rand = [System.Guid]::NewGuid().ToString("N").Substring(0, 6)
+    return "op-$ts-$rand"
+}
+
+function Register-Operation {
+    param(
+        [Parameter(Mandatory=$true)][string]$Type, # SCAN | PREVIEW | UPDATE | RESTORE
+        [Parameter(Mandatory=$true)][string]$Directory,
+        [hashtable]$Options = @{},
+        [array]$Rules = @()
+    )
+
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        # Check concurrency: Only ONE heavy COM operation can be active
+        $heavyTypes = @("SCAN", "PREVIEW", "UPDATE", "RESTORE")
+        if ($heavyTypes -contains $Type.ToUpper()) {
+            foreach ($key in $global:OperationsRegistry.Keys) {
+                $existing = $global:OperationsRegistry[$key]
+                if ($existing -and ($global:TERMINAL_OPERATION_STATES -notcontains $existing.status)) {
+                    return @{
+                        Success = $false
+                        ErrorCode = "OPERATION_ALREADY_RUNNING"
+                        ActiveOperationId = $existing.operationId
+                        ActiveType = $existing.type
+                        Error = "An operation is already running: $($existing.operationId) ($($existing.type)). Please wait or cancel it."
+                    }
+                }
+            }
+        }
+
+        $opId = New-OperationId
+        $nowIso = (Get-Date).ToUniversalTime().ToString("o")
+
+        $newOp = @{
+            operationId = $opId
+            type = $Type.ToUpper()
+            status = "QUEUED"
+            createdAt = $nowIso
+            startedAt = $null
+            finishedAt = $null
+            directory = $Directory
+            totalFiles = 0
+            processedFiles = 0
+            updatedFiles = 0
+            skippedFiles = 0
+            failedFiles = 0
+            currentFile = ""
+            currentStage = "Queued"
+            progressPercent = 0
+            warnings = @()
+            errors = @()
+            backupDirectory = ""
+            batchStatus = "PENDING"
+            cancelRequested = $false
+            options = $Options
+            rules = $Rules
+            logs = @()
+            resultData = $null
+        }
+
+        $global:OperationsRegistry[$opId] = $newOp
+
+        return @{
+            Success = $true
+            OperationId = $opId
+            Status = "QUEUED"
+            ErrorCode = ""
+            Error = ""
+        }
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Set-OperationStatus {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][string]$NewStatus,
+        [string]$CurrentStage = $null
+    )
+
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) {
+            return $false
+        }
+
+        $op = $global:OperationsRegistry[$OperationId]
+        Assert-ValidStateTransition $op.status $NewStatus
+
+        $op.status = $NewStatus
+        if (-not [string]::IsNullOrWhiteSpace($CurrentStage)) {
+            $op.currentStage = $CurrentStage
+        }
+
+        if ($NewStatus -eq "RUNNING" -and [string]::IsNullOrWhiteSpace($op.startedAt)) {
+            $op.startedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+
+        if ($global:TERMINAL_OPERATION_STATES -contains $NewStatus) {
+            $op.finishedAt = (Get-Date).ToUniversalTime().ToString("o")
+            if ($NewStatus -eq "COMPLETED") {
+                $op.progressPercent = 100
+            }
+        }
+
+        return $true
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Update-OperationProgress {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [int]$ProcessedFiles,
+        [int]$TotalFiles,
+        [string]$CurrentFile = "",
+        [string]$CurrentStage = "",
+        [int]$ProgressPercent = -1
+    )
+
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return $false }
+        $op = $global:OperationsRegistry[$OperationId]
+
+        if ($TotalFiles -gt 0) { $op.totalFiles = $TotalFiles }
+        if ($ProcessedFiles -ge 0) { $op.processedFiles = $ProcessedFiles }
+        if (-not [string]::IsNullOrWhiteSpace($CurrentFile)) { $op.currentFile = $CurrentFile }
+        if (-not [string]::IsNullOrWhiteSpace($CurrentStage)) { $op.currentStage = $CurrentStage }
+
+        if ($ProgressPercent -ge 0) {
+            # Monotonic progress: never drop unless resetting
+            if ($ProgressPercent -gt $op.progressPercent) {
+                $op.progressPercent = [Math]::Min(99, $ProgressPercent)
+            }
+        }
+
+        return $true
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Add-OperationWarning ([string]$OperationId, [string]$WarningMessage) {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return }
+        $op = $global:OperationsRegistry[$OperationId]
+        $clean = Protect-SensitiveData $WarningMessage
+        $op.warnings += $clean
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Add-OperationError ([string]$OperationId, [string]$ErrorMessage) {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return }
+        $op = $global:OperationsRegistry[$OperationId]
+        $clean = Protect-SensitiveData $ErrorMessage
+        $op.errors += $clean
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Request-OperationCancellation ([string]$OperationId) {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) {
+            return @{ Success = $false; Error = "Operation not found." }
+        }
+
+        $op = $global:OperationsRegistry[$OperationId]
+        if ($global:TERMINAL_OPERATION_STATES -contains $op.status) {
+            return @{ Success = $false; Error = "Operation is already in terminal state: $($op.status)" }
+        }
+
+        $op.cancelRequested = $true
+        if ($op.status -in @("QUEUED", "RUNNING")) {
+            $op.status = "CANCELLATION_REQUESTED"
+            $op.currentStage = "Cancellation Requested"
+        }
+
+        return @{ Success = $true; Status = $op.status; Message = "Cancellation signal dispatched." }
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Test-OperationCancellationRequested ([string]$OperationId) {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return $false }
+        return ($global:OperationsRegistry[$OperationId].cancelRequested -eq $true)
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Get-OperationSnapshot ([string]$OperationId) {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return $null }
+        $src = $global:OperationsRegistry[$OperationId]
+
+        # Produce a deep clone hashtable containing only serializable primitive objects
+        $snapshot = @{
+            operationId     = "$($src.operationId)"
+            type            = "$($src.type)"
+            status          = "$($src.status)"
+            createdAt       = "$($src.createdAt)"
+            startedAt       = if ($src.startedAt) { "$($src.startedAt)" } else { $null }
+            finishedAt      = if ($src.finishedAt) { "$($src.finishedAt)" } else { $null }
+            directory       = "$($src.directory)"
+            totalFiles      = [int]$src.totalFiles
+            processedFiles  = [int]$src.processedFiles
+            updatedFiles    = [int]$src.updatedFiles
+            skippedFiles    = [int]$src.skippedFiles
+            failedFiles     = [int]$src.failedFiles
+            currentFile     = "$($src.currentFile)"
+            currentStage    = "$($src.currentStage)"
+            progressPercent = [int]$src.progressPercent
+            warnings        = @($src.warnings)
+            errors          = @($src.errors)
+            backupDirectory = "$($src.backupDirectory)"
+            batchStatus     = "$($src.batchStatus)"
+            cancelRequested = [bool]$src.cancelRequested
+            options         = Protect-SensitiveData $src.options
+            rules           = Protect-SensitiveData $src.rules
+            logs            = @($src.logs)
+            resultData      = Protect-SensitiveData $src.resultData
+        }
+        return $snapshot
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Get-ActiveOperation () {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        foreach ($k in $global:OperationsRegistry.Keys) {
+            $op = $global:OperationsRegistry[$k]
+            if ($op -and ($global:TERMINAL_OPERATION_STATES -notcontains $op.status)) {
+                return Get-OperationSnapshot $k
+            }
+        }
+        return $null
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 4. Progress Model (Aşamalı Ağırlıklı İlerleme Hesabı)
+# ------------------------------------------------------------------------------
+function Calculate-WeightedProgress {
+    param(
+        [int]$TotalFiles,
+        [int]$CompletedFiles,
+        [string]$CurrentFileStage = "Preflight"
+    )
+
+    if ($TotalFiles -le 0) { return 0 }
+    if ($CompletedFiles -ge $TotalFiles) { return 100 }
+
+    # Overall weights
+    $preflightWeight = 5.0
+    $backupWeight = 5.0
+    $cleanupWeight = 5.0
+    $filesTotalWeight = 85.0
+
+    # Per-file cumulative stage weights (strictly monotonic within a file)
+    $stageWeights = @{
+        "Preflight"    = 0.05
+        "Staging"      = 0.15
+        "Excel Update" = 0.65
+        "Validation"   = 0.85
+        "Commit"       = 0.95
+        "Cleanup"      = 1.00
+    }
+
+    $stageFactor = if ($stageWeights.ContainsKey($CurrentFileStage)) { $stageWeights[$CurrentFileStage] } else { 0.10 }
+
+    $perFileWeight = $filesTotalWeight / [double]$TotalFiles
+    $completedWeight = [double]$CompletedFiles * $perFileWeight
+    $currentFileProgress = $stageFactor * $perFileWeight
+
+    $totalProgress = $preflightWeight + $backupWeight + $completedWeight + $currentFileProgress
+    $clamped = [Math]::Floor([Math]::Max(0.0, [Math]::Min(99.0, $totalProgress)))
+
+    return [int]$clamped
+}
+
+# ------------------------------------------------------------------------------
+# 5. History Atomic Persistence & Corrupt Recovery
+# ------------------------------------------------------------------------------
+function Save-OperationHistory {
+    param(
+        [Parameter(Mandatory=$true)][hashtable]$OperationSummary,
+        [string]$HistoryFilePath = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HistoryFilePath)) {
+        $HistoryFilePath = Join-Path (Get-Location) "logs\history.json"
+    }
+
+    $histDir = Split-Path -Parent $HistoryFilePath
+    if (-not (Test-Path $histDir)) {
+        New-Item -ItemType Directory -Path $histDir -Force | Out-Null
+    }
+
+    [System.Threading.Monitor]::Enter($global:HistoryFileLock)
+    try {
+        $existing = @()
+        if (Test-Path $HistoryFilePath) {
+            try {
+                $rawText = [System.IO.File]::ReadAllText($HistoryFilePath, [System.Text.Encoding]::UTF8)
+                if (-not [string]::IsNullOrWhiteSpace($rawText)) {
+                    $parsed = $rawText | ConvertFrom-Json
+                    if ($parsed -is [System.Collections.IEnumerable]) {
+                        $existing = @($parsed)
+                    } else {
+                        $existing = @($parsed)
+                    }
+                }
+            } catch {
+                # Corrupt history handling: preserve corrupted file with timestamp
+                $ts = (Get-Date).ToString("yyyyMMdd_HHmmss")
+                $corruptFile = Join-Path $histDir "history.corrupt.$ts.json"
+                try { Move-Item -LiteralPath $HistoryFilePath -Destination $corruptFile -Force } catch { }
+                $existing = @()
+            }
+        }
+
+        # Add or update summary
+        $cleanSummary = Protect-SensitiveData $OperationSummary
+        $newHistory = @($cleanSummary)
+        foreach ($item in $existing) {
+            if ($item.operationId -ne $cleanSummary.operationId) {
+                $newHistory += $item
+            }
+        }
+
+        # Retain last 500 operations
+        if ($newHistory.Count -gt 500) {
+            $newHistory = @($newHistory[0..499])
+        }
+
+        # Atomic write: history.tmp -> validate JSON -> atomic replace/rename
+        $tmpFile = Join-Path $histDir "history.tmp"
+        $json = ConvertTo-Json -InputObject @($newHistory) -Depth 6
+        if (-not $json.TrimStart().StartsWith("[")) {
+            $json = "[$json]"
+        }
+        [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+
+        # Validate tmp file before commit
+        $valTest = [System.IO.File]::ReadAllText($tmpFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($null -eq $valTest) {
+            throw "Failed to validate serialized history JSON."
+        }
+
+        if (Test-Path $HistoryFilePath) {
+            Remove-Item -LiteralPath $HistoryFilePath -Force
+        }
+        Move-Item -LiteralPath $tmpFile -Destination $HistoryFilePath -Force
+
+        return $true
+    } catch {
+        return $false
+    } finally {
+        [System.Threading.Monitor]::Exit($global:HistoryFileLock)
+    }
+}
+
+function Get-OperationHistory ([string]$HistoryFilePath = "") {
+    if ([string]::IsNullOrWhiteSpace($HistoryFilePath)) {
+        $HistoryFilePath = Join-Path (Get-Location) "logs\history.json"
+    }
+
+    if (-not (Test-Path $HistoryFilePath)) { return ,@() }
+
+    [System.Threading.Monitor]::Enter($global:HistoryFileLock)
+    try {
+        $rawText = [System.IO.File]::ReadAllText($HistoryFilePath, [System.Text.Encoding]::UTF8)
+        if ([string]::IsNullOrWhiteSpace($rawText)) { return ,@() }
+        $parsed = $rawText | ConvertFrom-Json
+        if ($null -eq $parsed) { return ,@() }
+        return ,@($parsed)
+    } catch {
+        # Corrupted history recovery
+        $histDir = Split-Path -Parent $HistoryFilePath
+        $ts = (Get-Date).ToString("yyyyMMdd_HHmmss")
+        $corruptFile = Join-Path $histDir "history.corrupt.$ts.json"
+        try { Move-Item -LiteralPath $HistoryFilePath -Destination $corruptFile -Force } catch { }
+        return ,@()
+    } finally {
+        [System.Threading.Monitor]::Exit($global:HistoryFileLock)
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 6. Structured JSONL Audit Logging (Thread-Safe)
+# ------------------------------------------------------------------------------
+function Write-AuditLogEvent {
+    param(
+        [string]$LogDirectory = "",
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][string]$Level,
+        [Parameter(Mandatory=$true)][string]$EventName,
+        [string]$File = "",
+        [string]$Stage = "",
+        [string]$Message = "",
+        [hashtable]$Data = @{}
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $LogDirectory = Join-Path (Get-Location) "logs"
+    }
+
+    $monthDir = Join-Path $LogDirectory (Get-Date).ToUniversalTime().ToString("yyyy-MM")
+    if (-not (Test-Path $monthDir)) {
+        New-Item -ItemType Directory -Path $monthDir -Force | Out-Null
+    }
+
+    $logFilePath = Join-Path $monthDir "$OperationId.jsonl"
+
+    $logEntry = @{
+        timestamp   = (Get-Date).ToUniversalTime().ToString("o")
+        operationId = $OperationId
+        level       = $Level.ToUpper()
+        event       = $EventName.ToUpper()
+        file        = $File
+        stage       = $Stage
+        message     = (Protect-SensitiveData $Message)
+        data        = (Protect-SensitiveData $Data)
+    }
+
+    $jsonLine = $logEntry | ConvertTo-Json -Depth 5 -Compress
+
+    [System.Threading.Monitor]::Enter($global:AuditLogLock)
+    try {
+        $writer = [System.IO.File]::AppendText($logFilePath)
+        try {
+            $writer.WriteLine($jsonLine)
+            $writer.Flush()
+        } finally {
+            $writer.Close()
+            $writer.Dispose()
+        }
+    } finally {
+        [System.Threading.Monitor]::Exit($global:AuditLogLock)
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 7. Real PowerShell STA Runspace Management
+# ------------------------------------------------------------------------------
+function New-StaRunspace () {
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = "STA"
+    $runspace.ThreadOptions = "ReuseThread"
+    $runspace.Open()
+
+    return @{
+        Runspace = $runspace
+    }
+}
+
+function Close-StaRunspace ($StaContext) {
+    if ($StaContext -and $StaContext.Runspace) {
+        try {
+            $StaContext.Runspace.Close()
+            $StaContext.Runspace.Dispose()
+        } catch { }
+        $StaContext.Runspace = $null
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 8. Diagnostics System Health Check (Side-Effect Free)
+# ------------------------------------------------------------------------------
+function Invoke-SystemDiagnostics ([string]$RepoRoot = "") {
+    if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+        $RepoRoot = (Get-Location).Path
+    }
+
+    $excelInstalled = $false
+    $excelVer = "Not Detected"
+    
+    # 1. Non-intrusive Excel COM check
+    try {
+        $excelType = [System.Type]::GetTypeFromProgID("Excel.Application")
+        if ($excelType) {
+            $excelInstalled = $true
+            # Read version cleanly without keeping any processes open
+            $iso = New-IsolatedExcelInstance
+            if ($iso -and $iso.Excel) {
+                $excelVer = "$($iso.Excel.Version)"
+                Close-IsolatedExcelInstance $iso
+            }
+        }
+    } catch { }
+
+    # 2. Directory writability checks
+    $workingDirWritable = $false
+    $testFile = Join-Path $RepoRoot ".__writetest_$([System.Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($testFile, "test")
+        $workingDirWritable = $true
+        Remove-Item -LiteralPath $testFile -Force
+    } catch { }
+
+    $backupBase = Join-Path $RepoRoot "_ExcelUpdater_Backups"
+    $backupDirWritable = $false
+    try {
+        if (-not (Test-Path $backupBase)) {
+            New-Item -ItemType Directory -Path $backupBase -Force | Out-Null
+        }
+        $backupTest = Join-Path $backupBase ".__writetest_$([System.Guid]::NewGuid().ToString('N')).tmp"
+        [System.IO.File]::WriteAllText($backupTest, "test")
+        $backupDirWritable = $true
+        Remove-Item -LiteralPath $backupTest -Force
+    } catch { }
+
+    # 3. Active Excel PIDs check
+    $activePids = @()
+    try {
+        $procs = Get-Process excel -ErrorAction SilentlyContinue
+        if ($procs) {
+            $activePids = @($procs | Select-Object -ExpandProperty Id)
+            $procs | ForEach-Object { $_.Dispose() }
+        }
+    } catch { }
+
+    return @{
+        Success = $true
+        ExcelComAvailable = $excelInstalled
+        ExcelVersion = $excelVer
+        PowerShellVersion = "$($PSVersionTable.PSVersion)"
+        CLRVersion = "$([System.Environment]::Version)"
+        WorkingDirWritable = $workingDirWritable
+        BackupDirWritable = $backupDirWritable
+        ActiveExcelPids = $activePids
+        ActiveOperationsCount = $global:OperationsRegistry.Count
+    }
+}
