@@ -88,6 +88,74 @@ function Test-ReplacementRulesValid ($Rules) {
     return @{ IsValid = $true; Error = ""; ValidRules = $validRules }
 }
 
+function Invoke-SafeReplacement ([string]$InputText, [array]$Rules, [string]$Mode = "Auto") {
+    if ([string]::IsNullOrEmpty($InputText) -or $null -eq $Rules -or $Rules.Count -eq 0) {
+        return @{
+            ResultText = $InputText
+            Modified = $false
+            ReplacementsCount = 0
+            Details = @()
+        }
+    }
+
+    $validation = Test-ReplacementRulesValid -Rules $Rules
+    if (-not $validation.IsValid) {
+        throw "Değiştirme kuralları geçersiz: $($validation.Error)"
+    }
+    $validRules = $validation.ValidRules
+
+    $patterns = @()
+    for ($i = 0; $i -lt $validRules.Count; $i++) {
+        $old = $validRules[$i].oldText
+        $escaped = [regex]::Escape($old)
+        
+        # Check if oldText is an IPv4 address
+        $isIpv4 = $old -match '^(\d{1,3}\.){3}\d{1,3}$'
+        if ($isIpv4) {
+            # Strict boundary: cannot be preceded or followed by a digit or dot
+            $pattern = "(?<r$i>(?<![\d\.])$escaped(?![\d\.]))"
+        } else {
+            # For hostnames, instances or words: boundary check
+            $prefix = if ($old -match '^\w') { "(?<!\w)" } else { "" }
+            $suffix = if ($old -match '\w$') { "(?!\w)" } else { "" }
+            $pattern = "(?<r$i>$prefix$escaped$suffix)"
+        }
+        $patterns += $pattern
+    }
+
+    $combinedRegexStr = $patterns -join "|"
+    $combinedRegex = [regex]::new($combinedRegexStr, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    $replacementsCount = 0
+    $details = @()
+
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+        param([System.Text.RegularExpressions.Match]$m)
+        for ($k = 0; $k -lt $validRules.Count; $k++) {
+            $grp = "r$k"
+            if ($m.Groups[$grp].Success) {
+                $script:curReplacementsCount++
+                $matchedRule = $validRules[$k]
+                $script:curDetails += "Eşleşme: '$($m.Value)' -> '$($matchedRule.newText)'"
+                return $matchedRule.newText
+            }
+        }
+        return $m.Value
+    }
+
+    $script:curReplacementsCount = 0
+    $script:curDetails = @()
+
+    $resultText = $combinedRegex.Replace($InputText, $evaluator)
+
+    return @{
+        ResultText = $resultText
+        Modified = ($resultText -ne $InputText)
+        ReplacementsCount = $script:curReplacementsCount
+        Details = $script:curDetails
+    }
+}
+
 function Cleanup-ExcelCOM ($excel) {
     if ($excel) {
         try { $excel.Quit() } catch { }
