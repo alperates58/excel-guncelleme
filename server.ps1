@@ -206,11 +206,31 @@ while ($listener.IsListening) {
             $path = "/index.html"
         }
 
-        $localFilePath = Join-Path $publicDir ($path.TrimStart('/'))
+        # UrlDecode requested path to prevent encoded traversal attacks
+        $decodedPath = ""
+        try {
+            Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+            $decodedPath = [System.Web.HttpUtility]::UrlDecode($path).TrimStart('/')
+        } catch {
+            $decodedPath = [System.Uri]::UnescapeDataString($path).TrimStart('/')
+        }
+        if ([string]::IsNullOrWhiteSpace($decodedPath)) {
+            $decodedPath = [System.Uri]::UnescapeDataString($path).TrimStart('/')
+        }
 
-        if (Test-Path $localFilePath -PathType Leaf) {
-            $buffer = [System.IO.File]::ReadAllBytes($localFilePath)
-            $response.ContentType = Get-ContentType $localFilePath
+        # Resolve canonical public root directory with trailing separator
+        $canonicalPublic = [System.IO.Path]::GetFullPath($publicDir)
+        if (-not $canonicalPublic.EndsWith([System.IO.Path]::DirectorySeparatorChar.ToString())) {
+            $canonicalPublic += [System.IO.Path]::DirectorySeparatorChar
+        }
+
+        # Resolve full canonical path of the requested item
+        $canonicalTarget = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($canonicalPublic, $decodedPath))
+
+        # Enforce canonical containment: candidate path must strictly start with canonical public root
+        if ($canonicalTarget.StartsWith($canonicalPublic, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $canonicalTarget -PathType Leaf)) {
+            $buffer = [System.IO.File]::ReadAllBytes($canonicalTarget)
+            $response.ContentType = Get-ContentType $canonicalTarget
             $response.ContentLength64 = $buffer.Length
             $response.OutputStream.Write($buffer, 0, $buffer.Length)
             $response.OutputStream.Close()
