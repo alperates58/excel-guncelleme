@@ -725,3 +725,136 @@ function Invoke-SystemDiagnostics ([string]$RepoRoot = "") {
         ActiveOperationsCount = $global:OperationsRegistry.Count
     }
 }
+
+# ------------------------------------------------------------------------------
+# 9. Asynchronous STA Operation Worker Dispatcher
+# ------------------------------------------------------------------------------
+function Start-AsyncOperationWorker {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][string]$RepoRoot
+    )
+
+    $op = Get-OperationSnapshot $OperationId
+    if (-not $op) { return $false }
+
+    $enginePath = Join-Path $RepoRoot "engine\excel_engine.ps1"
+    $managerPath = Join-Path $RepoRoot "engine\operation_manager.ps1"
+
+    $sta = New-StaRunspace
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $sta.Runspace
+
+    $scriptBlock = {
+        param($opId, $repoRoot, $engineScript, $mgrScript)
+        
+        $ErrorActionPreference = "Stop"
+        
+        # 1. Explicitly bootstrap dependencies in the new STA runspace (Rule 2)
+        if (Test-Path $mgrScript) { . $mgrScript }
+        if (Test-Path $engineScript) { . $engineScript }
+
+        # 2. Transition state to RUNNING
+        Set-OperationStatus $opId "RUNNING" "Initializing" | Out-Null
+        Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_STARTED" -Message "Worker started in STA runspace"
+
+        $op = Get-OperationSnapshot $opId
+        $type = $op.type
+        $dir = $op.directory
+        $rules = $op.rules
+        $options = $op.options
+
+        $result = $null
+        try {
+            switch ($type) {
+                "UPDATE" {
+                    $result = Update-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
+                }
+                "PREVIEW" {
+                    $result = Preview-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
+                }
+                "SCAN" {
+                    $result = Scan-ExcelDirectory -DirectoryPath $dir
+                }
+                "RESTORE" {
+                    $backupDir = if ($options -and $options.backupDir) { $options.backupDir } else { "" }
+                    $result = Restore-VerifiedBackup -BackupDirectory $backupDir -TargetDirectory $dir -OperationId $opId
+                }
+                default {
+                    throw "Unsupported operation type: $type"
+                }
+            }
+
+            # If not already terminal, update status from result
+            $currentOp = Get-OperationSnapshot $opId
+            if ($global:TERMINAL_OPERATION_STATES -notcontains $currentOp.status) {
+                if ($result.success -or $result.Success) {
+                    Set-OperationStatus $opId "COMPLETED" "Done" | Out-Null
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_COMPLETED" -Message "Operation finished successfully" -Data @{ result = $result }
+                } elseif ($result.batchStatus -eq "CANCELLED") {
+                    Set-OperationStatus $opId "CANCELLED" "Cancelled by user" | Out-Null
+                    Write-AuditLogEvent -OperationId $opId -Level "WARNING" -EventName "OPERATION_CANCELLED" -Message "Operation cancelled by user"
+                } elseif ($result.batchStatus -eq "ROLLBACK_PARTIAL_FAILURE") {
+                    Set-OperationStatus $opId "ROLLBACK_PARTIAL_FAILURE" "Rollback partial failure" | Out-Null
+                    Write-AuditLogEvent -OperationId $opId -Level "CRITICAL" -EventName "ROLLBACK_PARTIAL_FAILURE" -Message "Rollback partially failed" -Data @{ error = $result.error }
+                } else {
+                    Set-OperationStatus $opId "FAILED" "Failed" | Out-Null
+                    Add-OperationError $opId "$($result.error)"
+                    Write-AuditLogEvent -OperationId $opId -Level "ERROR" -EventName "OPERATION_FAILED" -Message "Operation failed: $($result.error)" -Data @{ error = $result.error }
+                }
+            }
+
+            # Store final result data (sanitized)
+            [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+            try {
+                if ($global:OperationsRegistry.ContainsKey($opId)) {
+                    $global:OperationsRegistry[$opId].resultData = Protect-SensitiveData $result
+                    if ($result.logs) { $global:OperationsRegistry[$opId].logs = @($result.logs) }
+                    if ($result.backupDirectory) { $global:OperationsRegistry[$opId].backupDirectory = "$($result.backupDirectory)" }
+                    if ($result.updatedFilesCount) { $global:OperationsRegistry[$opId].updatedFiles = [int]$result.updatedFilesCount }
+                    if ($result.totalFilesProcessed) { $global:OperationsRegistry[$opId].processedFiles = [int]$result.totalFilesProcessed }
+                }
+            } finally {
+                [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+            }
+
+        } catch {
+            Set-OperationStatus $opId "FAILED" "Error: $_" | Out-Null
+            Add-OperationError $opId "$_"
+            Write-AuditLogEvent -OperationId $opId -Level "ERROR" -EventName "OPERATION_EXCEPTION" -Message "$_"
+        } finally {
+            # Save to persistent history
+            $finalSnap = Get-OperationSnapshot $opId
+            if ($finalSnap) {
+                Save-OperationHistory -OperationSummary $finalSnap | Out-Null
+            }
+        }
+    }
+
+    $ps.AddScript($scriptBlock) | Out-Null
+    $ps.AddArgument($OperationId) | Out-Null
+    $ps.AddArgument($RepoRoot) | Out-Null
+    $ps.AddArgument($enginePath) | Out-Null
+    $ps.AddArgument($managerPath) | Out-Null
+
+    $asyncState = @{
+        PowerShell = $ps
+        RunspaceContext = $sta
+        OperationId = $OperationId
+    }
+
+    $callback = [System.AsyncCallback]{
+        param($ar)
+        try {
+            $state = $ar.AsyncState
+            $p = $state.PowerShell
+            $r = $state.RunspaceContext
+            try { $p.EndInvoke($ar) | Out-Null } catch { }
+            $p.Dispose()
+            Close-StaRunspace $r
+        } catch { }
+    }
+
+    $null = $ps.BeginInvoke($null, $null, $callback, $asyncState)
+    return $true
+}

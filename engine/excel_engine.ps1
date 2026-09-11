@@ -1277,8 +1277,8 @@ function Restore-BatchBackup {
     }
 }
 
-function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
-    $opId = New-OperationId
+function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]$OperationId = "") {
+    $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
     $files = Get-ExcelFiles $DirectoryPath
     $updateLog = @()
     $updatedFilesCount = 0
@@ -1311,6 +1311,22 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
         }
     }
 
+    # Cancellation Checkpoint 1 (After Preflight)
+    if ($opId -and (Get-Command "Test-OperationCancellationRequested" -ErrorAction SilentlyContinue) -and (Test-OperationCancellationRequested $opId)) {
+        if (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue) { $null = Set-OperationStatus $opId "CANCELLED" "Cancelled by user" }
+        return @{
+            success = $false
+            error = "İşlem kullanıcı tarafından iptal edildi."
+            batchStatus = "CANCELLED"
+            directory = $DirectoryPath
+            totalFilesProcessed = 0
+            updatedFilesCount = 0
+            totalReplacements = 0
+            logs = @()
+            backupDirectory = $null
+        }
+    }
+
     # Backup handling:
     $backupDir = $null
     $autoBackupRequested = if ($Options -and $Options.autoBackup -ne $null) { $Options.autoBackup } else { $true }
@@ -1323,6 +1339,22 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
             return @{ success = $false; error = "Auto-backup failed prior to update: $($backupRes.error)" }
         }
         $backupDir = $backupRes.backupDirectory
+    }
+
+    # Cancellation Checkpoint 2 (After Backup)
+    if ($opId -and (Get-Command "Test-OperationCancellationRequested" -ErrorAction SilentlyContinue) -and (Test-OperationCancellationRequested $opId)) {
+        if (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue) { $null = Set-OperationStatus $opId "CANCELLED" "Cancelled by user" }
+        return @{
+            success = $false
+            error = "İşlem kullanıcı tarafından iptal edildi."
+            batchStatus = "CANCELLED"
+            directory = $DirectoryPath
+            totalFilesProcessed = 0
+            updatedFilesCount = 0
+            totalReplacements = 0
+            logs = @()
+            backupDirectory = $backupDir
+        }
     }
 
     $updatePowerQueries = if ($Options -and $Options.updateQueries -ne $null) { $Options.updateQueries } else { $true }
@@ -1344,9 +1376,22 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
     $hasFatalFileError = $false
 
     try {
+        $cancelledDuringBatch = $false
         foreach ($file in $files) {
+            # Cancellation Checkpoint 3 (Before staging creation)
+            if ($opId -and (Get-Command "Test-OperationCancellationRequested" -ErrorAction SilentlyContinue) -and (Test-OperationCancellationRequested $opId)) {
+                $cancelledDuringBatch = $true
+                break
+            }
+
             $processedCount++
             Set-ProgressState $true "update" $processedCount $totalCount $file.Name
+            if ($opId -and (Get-Command "Calculate-WeightedProgress" -ErrorAction SilentlyContinue)) {
+                $pct = Calculate-WeightedProgress -TotalFiles $totalCount -CompletedFiles ($processedCount - 1) -CurrentFileStage "Excel Update"
+                if (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue) {
+                    $null = Update-OperationProgress -OperationId $opId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile $file.Name -CurrentStage "Excel Update" -ProgressPercent $pct
+                }
+            }
 
             $fileLog = @{
                 fileName = $file.Name
@@ -1555,8 +1600,21 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
                         throw "Semantic validation failed on staged workbook: $($cmp.Errors -join '; ')"
                     }
 
-                    # 11. Commit staging file using guarded Commit-StagingWorkbook
+                    # Cancellation Checkpoint 4 (Before commit)
+                    if ($opId -and (Get-Command "Test-OperationCancellationRequested" -ErrorAction SilentlyContinue) -and (Test-OperationCancellationRequested $opId)) {
+                        Remove-StagingFile -StagingPath $stagingPath
+                        $cancelledDuringBatch = $true
+                        break
+                    }
+
+                    # 11. Commit staging file using guarded Commit-StagingWorkbook (Rule 12: Critical section)
+                    if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) {
+                        $null = Set-OperationStatus $opId "COMMITTING" "Committing $($file.Name)"
+                    }
                     $commitRes = Commit-StagingWorkbook -StagingPath $stagingPath -OriginalPath $file.FullName -InitialHash $initialHash -OperationId $opId
+                    if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) {
+                        $null = Set-OperationStatus $opId "RUNNING" "Committed $($file.Name)"
+                    }
                     if (-not $commitRes.Success) {
                         if ($commitRes.ErrorCode -eq "CRITICAL_MANUAL_RECOVERY_REQUIRED") {
                             $fileLog.criticalRecovery = $commitRes
@@ -1603,6 +1661,56 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
         # Restore isolation settings and safely terminate isolated instance
         if ($iso) {
             Close-IsolatedExcelInstance -IsolationContext $iso
+        }
+    }
+
+    # 11.5 Cooperative Cancellation Handler
+    if ($cancelledDuringBatch) {
+        if ($atomicBatch -and $committedFiles.Count -gt 0 -and $backupDir) {
+            Set-ProgressState $false "update" $processedCount $totalCount "İşlem iptal edildi! Değişiklikler geri alınıyor (Rollback)..."
+            if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) { $null = Set-OperationStatus $opId "ROLLING_BACK" "Rolling back due to cancellation" }
+            $restoreRes = Restore-BatchBackup -BackupDir $backupDir -TargetDir $DirectoryPath
+            if ($restoreRes.Success) {
+                if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) { $null = Set-OperationStatus $opId "CANCELLED" "Cancelled and Rolled Back" }
+                return @{
+                    success = $false
+                    error = "İşlem kullanıcı tarafından iptal edildi. Yapılan tüm değişiklikler başarıyla geri alındı (Rollback)."
+                    batchStatus = "CANCELLED"
+                    directory = $DirectoryPath
+                    totalFilesProcessed = $processedCount
+                    updatedFilesCount = 0
+                    totalReplacements = 0
+                    logs = $updateLog
+                    backupDirectory = $backupDir
+                }
+            } else {
+                if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) { $null = Set-OperationStatus $opId "ROLLBACK_PARTIAL_FAILURE" "Rollback partial failure on cancel" }
+                return @{
+                    success = $false
+                    error = "İşlem iptal edildi fakat geri alma (Rollback) kısmen başarısız oldu! Acil müdahale gerekebilir: $($restoreRes.Errors -join '; ')"
+                    batchStatus = "ROLLBACK_PARTIAL_FAILURE"
+                    directory = $DirectoryPath
+                    totalFilesProcessed = $processedCount
+                    updatedFilesCount = 0
+                    totalReplacements = 0
+                    logs = $updateLog
+                    backupDirectory = $backupDir
+                    failedRestoreFiles = $restoreRes.failedRestoreFiles
+                }
+            }
+        } else {
+            if ($opId -and (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue)) { $null = Set-OperationStatus $opId "CANCELLED" "Cancelled by user" }
+            return @{
+                success = $false
+                error = "İşlem kullanıcı tarafından iptal edildi."
+                batchStatus = "CANCELLED"
+                directory = $DirectoryPath
+                totalFilesProcessed = $processedCount
+                updatedFilesCount = 0
+                totalReplacements = 0
+                logs = $updateLog
+                backupDirectory = $backupDir
+            }
         }
     }
 
@@ -1918,5 +2026,56 @@ function Preview-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string
         TotalReplacements = $overallReplacements
         Files = $previewFiles
         Warnings = $globalWarnings
+    }
+}
+
+function Restore-VerifiedBackup ($BackupDirectory, $TargetDirectory, [string]$OperationId = "") {
+    if ([string]::IsNullOrWhiteSpace($BackupDirectory) -or -not (Test-Path -LiteralPath $BackupDirectory -PathType Container)) {
+        return @{ Success = $false; Error = "Yedek klasörü bulunamadı veya geçersiz: $BackupDirectory" }
+    }
+    if ([string]::IsNullOrWhiteSpace($TargetDirectory) -or -not (Test-Path -LiteralPath $TargetDirectory -PathType Container)) {
+        return @{ Success = $false; Error = "Hedef klasör bulunamadı veya geçersiz: $TargetDirectory" }
+    }
+
+    $resolvedBackup = (Resolve-Path -LiteralPath $BackupDirectory).Path
+    $resolvedTarget = (Resolve-Path -LiteralPath $TargetDirectory).Path
+
+    $manifestPath = Join-Path $resolvedBackup "backup_manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return @{ Success = $false; Error = "Yedek klasöründe geçerli bir 'backup_manifest.json' bulunamadı: $resolvedBackup" }
+    }
+
+    # 1. Pre-restore Recovery Snapshot (Rule 21)
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles 1 -CurrentFile "Pre-Restore Snapshot" -CurrentStage "Pre-Restore Backup" -ProgressPercent 25
+    }
+    $preRecoveryRes = Create-ExcelBackup -DirectoryPath $resolvedTarget
+    if (-not $preRecoveryRes.success) {
+        return @{ Success = $false; Error = "Restore öncesi güvenlik yedeği alınamadı: $($preRecoveryRes.error)" }
+    }
+
+    # 2. Perform Verified Batch Restore
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles 1 -CurrentFile "Restoring files" -CurrentStage "Restoring" -ProgressPercent 65
+    }
+    $restoreRes = Restore-BatchBackup -BackupDir $resolvedBackup -TargetDir $resolvedTarget
+
+    if (-not $restoreRes.Success) {
+        return @{
+            Success = $false
+            Error = "Yedekten geri yükleme başarısız oldu: $($restoreRes.Errors -join '; ')"
+            FailedFiles = $restoreRes.failedRestoreFiles
+            PreRestoreBackup = $preRecoveryRes.backupDirectory
+        }
+    }
+
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 1 -TotalFiles 1 -CurrentFile "Completed" -CurrentStage "Done" -ProgressPercent 100
+    }
+
+    return @{
+        Success = $true
+        RestoredFiles = $restoreRes.RestoredFiles
+        PreRestoreBackup = $preRecoveryRes.backupDirectory
     }
 }
