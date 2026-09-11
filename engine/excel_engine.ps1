@@ -85,7 +85,7 @@ function Test-ReplacementRulesValid ($Rules) {
         return @{ IsValid = $false; Error = "Geçerli bir arama/değiştirme kuralı bulunamadı."; ValidRules = @() }
     }
 
-    return @{ IsValid = $true; Error = ""; ValidRules = $validRules }
+    return @{ IsValid = $true; Error = ""; ValidRules = $validRules; Rules = $validRules }
 }
 
 function Invoke-SafeReplacement ([string]$InputText, [array]$Rules, [string]$Mode = "Auto") {
@@ -94,6 +94,7 @@ function Invoke-SafeReplacement ([string]$InputText, [array]$Rules, [string]$Mod
             ResultText = $InputText
             Modified = $false
             ReplacementsCount = 0
+            MatchCount = 0
             Details = @()
         }
     }
@@ -152,6 +153,7 @@ function Invoke-SafeReplacement ([string]$InputText, [array]$Rules, [string]$Mod
         ResultText = $resultText
         Modified = ($resultText -ne $InputText)
         ReplacementsCount = $script:curReplacementsCount
+        MatchCount = $script:curReplacementsCount
         Details = $script:curDetails
     }
 }
@@ -488,11 +490,13 @@ function New-StagingFile ([string]$OriginalFilePath, [string]$OperationId = "") 
 }
 
 function Remove-StagingFile ([string]$StagingPath) {
-    if (-not [string]::IsNullOrWhiteSpace($StagingPath) -and (Test-Path $StagingPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($StagingPath) -and (Test-Path -LiteralPath $StagingPath)) {
         try {
-            $f = Get-Item $StagingPath
-            $f.Attributes = [System.IO.FileAttributes]::Normal
-            Remove-Item $StagingPath -Force -ErrorAction SilentlyContinue
+            $f = Get-Item -LiteralPath $StagingPath -Force -ErrorAction SilentlyContinue
+            if ($f) {
+                $f.Attributes = [System.IO.FileAttributes]::Normal
+            }
+            Remove-Item -LiteralPath $StagingPath -Force -ErrorAction SilentlyContinue
         } catch { }
     }
 }
@@ -540,6 +544,7 @@ function New-IsolatedExcelInstance () {
 
     return @{
         App = $excel
+        Excel = $excel
         Pid = $excelPid
         OriginalCalculation = $origCalc
         OriginalCalculateBeforeSave = $origCalcBeforeSave
@@ -816,7 +821,193 @@ function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     }
 }
 
+function Commit-StagingWorkbook {
+    param(
+        [Parameter(Mandatory=$true)][string]$StagingPath,
+        [Parameter(Mandatory=$true)][string]$OriginalPath,
+        [Parameter(Mandatory=$true)][string]$InitialHash,
+        [string]$OperationId = ""
+    )
+
+    if (-not (Test-Path -LiteralPath $StagingPath)) {
+        return @{
+            Success = $false
+            ErrorCode = "STAGING_MISSING"
+            Error = "Staging file does not exist: $StagingPath"
+        }
+    }
+
+    $stagingItem = Get-Item -LiteralPath $StagingPath -Force
+    if ($stagingItem.Length -le 0) {
+        return @{
+            Success = $false
+            ErrorCode = "STAGING_EMPTY"
+            Error = "Staging file is 0 bytes: $StagingPath"
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $OriginalPath)) {
+        return @{
+            Success = $false
+            ErrorCode = "ORIGINAL_MISSING"
+            Error = "Original target file does not exist: $OriginalPath"
+        }
+    }
+
+    # 1. TOCTOU Concurrency Guard: verify original has not been modified since initial read
+    $currentHash = Get-FileSha256 $OriginalPath
+    if ($currentHash -ne $InitialHash) {
+        Remove-Item -LiteralPath $StagingPath -Force -ErrorAction SilentlyContinue
+        return @{
+            Success = $false
+            ErrorCode = "CONCURRENT_MODIFICATION_DETECTED"
+            Error = "Original file was modified by another process/user while update was in progress. Operation aborted for safety."
+        }
+    }
+
+    # 2. Capture staging hash and size
+    $stagingHash = Get-FileSha256 $StagingPath
+    $stagingLength = $stagingItem.Length
+
+    # Clear hidden/system attributes on staging file so target file doesn't remain hidden
+    try {
+        [System.IO.File]::SetAttributes($StagingPath, [System.IO.FileAttributes]::Normal)
+    } catch { }
+
+    $methodUsed = "None"
+    $opTag = if ([string]::IsNullOrWhiteSpace($OperationId)) { [System.Guid]::NewGuid().ToString("N").Substring(0, 8) } else { $OperationId }
+    $replaceBak = "$OriginalPath.$opTag.replace_bak"
+
+    # 3. Primary: Try [System.IO.File]::Replace
+    $primarySuccess = $false
+    try {
+        if (Test-Path -LiteralPath $replaceBak) {
+            Remove-Item -LiteralPath $replaceBak -Force -ErrorAction SilentlyContinue
+        }
+
+        [System.IO.File]::Replace($StagingPath, $OriginalPath, $replaceBak, $true)
+        $methodUsed = "File.Replace"
+        $primarySuccess = $true
+    } catch {
+        # Fallback to Two-Phase Rename
+        $methodUsed = "TwoPhaseRename"
+        $renameBak = "$OriginalPath.$opTag.rename_bak"
+        try {
+            if (Test-Path -LiteralPath $renameBak) {
+                Remove-Item -LiteralPath $renameBak -Force -ErrorAction SilentlyContinue
+            }
+
+            Move-Item -LiteralPath $OriginalPath -Destination $renameBak -Force
+            try {
+                Move-Item -LiteralPath $StagingPath -Destination $OriginalPath -Force
+                $replaceBak = $renameBak
+            } catch {
+                # Staging move failed -> rollback original from renameBak!
+                if (Test-Path -LiteralPath $renameBak) {
+                    Move-Item -LiteralPath $renameBak -Destination $OriginalPath -Force -ErrorAction SilentlyContinue
+                }
+                return @{
+                    Success = $false
+                    ErrorCode = "COMMIT_RENAME_FAILED"
+                    Error = "Two-phase rename fallback failed: $_. Original file rolled back."
+                }
+            }
+        } catch {
+            return @{
+                Success = $false
+                ErrorCode = "COMMIT_BACKUP_FAILED"
+                Error = "Failed to initiate rename fallback: $_"
+            }
+        }
+    }
+
+    # 4. Mandatory Post-Commit Verification
+    if (-not (Test-Path -LiteralPath $OriginalPath)) {
+        return @{
+            Success = $false
+            ErrorCode = "POST_COMMIT_MISSING"
+            Error = "Target file missing after commit attempt!"
+        }
+    }
+
+    $finalItem = Get-Item -LiteralPath $OriginalPath -Force
+    if ($finalItem.Length -le 0 -or $finalItem.Length -ne $stagingLength) {
+        return @{
+            Success = $false
+            ErrorCode = "POST_COMMIT_SIZE_MISMATCH"
+            Error = "Target file length mismatch: expected $stagingLength bytes, found $($finalItem.Length) bytes."
+        }
+    }
+
+    $finalHash = Get-FileSha256 $OriginalPath
+    if ($finalHash -ne $stagingHash) {
+        return @{
+            Success = $false
+            ErrorCode = "POST_COMMIT_HASH_MISMATCH"
+            Error = "Target file hash mismatch after commit: expected $stagingHash, found $finalHash."
+        }
+    }
+
+    # Post-commit verification passed: clean up temporary backup file
+    if (Test-Path -LiteralPath $replaceBak) {
+        Remove-Item -LiteralPath $replaceBak -Force -ErrorAction SilentlyContinue
+    }
+
+    return @{
+        Success = $true
+        ErrorCode = $null
+        Method = $methodUsed
+        FinalHash = $finalHash
+        Length = $stagingLength
+    }
+}
+
+function Restore-BatchBackup {
+    param(
+        [Parameter(Mandatory=$true)][string]$BackupDir,
+        [Parameter(Mandatory=$true)][string]$TargetDir
+    )
+
+    if (-not (Test-Path -LiteralPath $BackupDir)) {
+        return @{ Success = $false; Error = "Backup directory not found: $BackupDir" }
+    }
+
+    $backupFiles = Get-ChildItem -LiteralPath $BackupDir -File
+    $restoredCount = 0
+    $errors = @()
+
+    foreach ($bf in $backupFiles) {
+        $targetFile = Join-Path $TargetDir $bf.Name
+        try {
+            Copy-Item -LiteralPath $bf.FullName -Destination $targetFile -Force
+            $bfHash = Get-FileSha256 $bf.FullName
+            $tfHash = Get-FileSha256 $targetFile
+            if ($bfHash -ne $tfHash) {
+                $errors += "Checksum mismatch after restoring $($bf.Name)"
+            } else {
+                $restoredCount++
+            }
+        } catch {
+            $errors += "Failed to restore $($bf.Name): $_"
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        return @{
+            Success = $false
+            RestoredCount = $restoredCount
+            Errors = $errors
+        }
+    }
+
+    return @{
+        Success = $true
+        RestoredCount = $restoredCount
+    }
+}
+
 function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
+    $opId = New-OperationId
     $files = Get-ExcelFiles $DirectoryPath
     $updateLog = @()
     $updatedFilesCount = 0
@@ -831,247 +1022,341 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
     }
 
     # Validate rules
-    $validRules = @()
-    foreach ($r in $Rules) {
-        if (-not [string]::IsNullOrWhiteSpace($r.oldText) -and -not [string]::IsNullOrWhiteSpace($r.newText)) {
-            $validRules += @{ oldText = $r.oldText; newText = $r.newText }
+    $ruleValidation = Test-ReplacementRulesValid $Rules
+    if (-not $ruleValidation.IsValid) {
+        Set-ProgressState $false "update" 0 0 ""
+        return @{ success = $false; error = "Rule validation failed: $($ruleValidation.Errors -join '; ')" }
+    }
+    $validRules = $ruleValidation.Rules
+
+    # Pre-flight check: ensure all files are writable before doing anything
+    foreach ($f in $files) {
+        if (-not (Test-FileWritable $f.FullName)) {
+            Set-ProgressState $false "update" 0 0 ""
+            return @{
+                success = $false
+                error = "File is locked or read-only: $($f.Name). Update aborted before making any changes."
+            }
         }
     }
 
-    if ($validRules.Count -eq 0) {
-        Set-ProgressState $false "update" 0 0 ""
-        return @{ success = $false; error = "No valid search/replace rules provided." }
-    }
+    # Backup handling:
+    $backupDir = $null
+    $autoBackupRequested = if ($Options -and $Options.autoBackup -ne $null) { $Options.autoBackup } else { $true }
+    $atomicBatch = if ($Options -and $Options.atomicBatch -ne $null) { $Options.atomicBatch } else { $true }
 
-    # Check auto-backup option
-    if ($Options -and $Options.autoBackup -eq $true) {
+    if ($autoBackupRequested -or $atomicBatch) {
         $backupRes = Create-ExcelBackup -DirectoryPath $DirectoryPath
         if (-not $backupRes.success) {
             Set-ProgressState $false "update" 0 0 ""
             return @{ success = $false; error = "Auto-backup failed prior to update: $($backupRes.error)" }
         }
-    }
-
-    $excel = $null
-    try {
-        $excel = New-Object -ComObject Excel.Application
-        $excel.Visible = $false
-        $excel.DisplayAlerts = $false
-        $excel.ScreenUpdating = $false
-    } catch {
-        Set-ProgressState $false "update" 0 0 ""
-        return @{ success = $false; error = "Could not initialize Excel COM object: $_" }
+        $backupDir = $backupRes.backupDirectory
     }
 
     $updatePowerQueries = if ($Options -and $Options.updateQueries -ne $null) { $Options.updateQueries } else { $true }
     $updateConnections  = if ($Options -and $Options.updateConnections -ne $null) { $Options.updateConnections } else { $true }
     $updateVba          = if ($Options -and $Options.updateVba -ne $null) { $Options.updateVba } else { $true }
 
-    $processedCount = 0
-
-    foreach ($file in $files) {
-        $processedCount++
-        Set-ProgressState $true "update" $processedCount $totalCount $file.Name
-
-        $fileLog = @{
-            fileName = $file.Name
-            filePath = $file.FullName
-            status = "Skipped"
-            changesMade = 0
-            details = @()
-        }
-
-        try {
-            $wb = $excel.Workbooks.Open($file.FullName, 0, $false) # Open read-write
-            $fileModified = $false
-
-            # 1. Update Power Queries
-            if ($updatePowerQueries) {
-                try {
-                    foreach ($q in $wb.Queries) {
-                        $formula = $q.Formula
-                        $newFormula = $formula
-                        foreach ($rule in $validRules) {
-                            if ($newFormula.Contains($rule.oldText)) {
-                                $newFormula = $newFormula.Replace($rule.oldText, $rule.newText)
-                                $fileLog.changesMade++
-                                $totalReplacements++
-                                $fileLog.details += "PowerQuery '$($q.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                            }
-                        }
-                        if ($newFormula -ne $formula) {
-                            $q.Formula = $newFormula
-                            $fileModified = $true
-                        }
-                    }
-                } catch {
-                    $fileLog.details += "PowerQuery error: $_"
-                }
-            }
-
-            # 2. Update Data Connections
-            if ($updateConnections) {
-                try {
-                    foreach ($conn in $wb.Connections) {
-                        # Connection names must remain immutable to protect PivotTables, Data Models and VBA references.
-                        # Only connection strings and command texts are updated.
-
-                        try {
-                            if ($conn.OLEDBConnection) {
-                                $cStr = $conn.OLEDBConnection.ConnectionString
-                                $newCStr = $cStr
-                                foreach ($rule in $validRules) {
-                                    if ($newCStr.Contains($rule.oldText)) {
-                                        $newCStr = $newCStr.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "OLEDB ConnStr in '$($conn.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newCStr -ne $cStr) {
-                                    $conn.OLEDBConnection.ConnectionString = $newCStr
-                                    $fileModified = $true
-                                }
-
-                                $cmd = $conn.OLEDBConnection.CommandText
-                                $newCmd = $cmd
-                                foreach ($rule in $validRules) {
-                                    if ($newCmd.Contains($rule.oldText)) {
-                                        $newCmd = $newCmd.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "OLEDB CommandText in '$($conn.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newCmd -ne $cmd) {
-                                    $conn.OLEDBConnection.CommandText = $newCmd
-                                    $fileModified = $true
-                                }
-                            }
-                        } catch { }
-
-                        try {
-                            if ($conn.ODBCConnection) {
-                                $cStr = $conn.ODBCConnection.ConnectionString
-                                $newCStr = $cStr
-                                foreach ($rule in $validRules) {
-                                    if ($newCStr.Contains($rule.oldText)) {
-                                        $newCStr = $newCStr.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "ODBC ConnStr in '$($conn.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newCStr -ne $cStr) {
-                                    $conn.ODBCConnection.ConnectionString = $newCStr
-                                    $fileModified = $true
-                                }
-
-                                $cmd = $conn.ODBCConnection.CommandText
-                                $newCmd = $cmd
-                                foreach ($rule in $validRules) {
-                                    if ($newCmd.Contains($rule.oldText)) {
-                                        $newCmd = $newCmd.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "ODBC CommandText in '$($conn.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newCmd -ne $cmd) {
-                                    $conn.ODBCConnection.CommandText = $newCmd
-                                    $fileModified = $true
-                                }
-                            }
-                        } catch { }
-                    }
-                } catch {
-                    $fileLog.details += "Connection error: $_"
-                }
-            }
-
-            # 3. Update QueryTables
-            if ($updateConnections) {
-                try {
-                    foreach ($ws in $wb.Worksheets) {
-                        foreach ($qt in $ws.QueryTables) {
-                            try {
-                                $qtConn = $qt.Connection
-                                $newQtConn = $qtConn
-                                foreach ($rule in $validRules) {
-                                    if ($newQtConn.Contains($rule.oldText)) {
-                                        $newQtConn = $newQtConn.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "QueryTable Connection on '$($ws.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newQtConn -ne $qtConn) {
-                                    $qt.Connection = $newQtConn
-                                    $fileModified = $true
-                                }
-                            } catch { }
-                        }
-                    }
-                } catch { }
-            }
-
-            # 4. Update VBA Macros
-            if ($updateVba -and ($file.Extension.ToLower() -in @(".xlsm", ".xlsb"))) {
-                try {
-                    foreach ($comp in $wb.VBProject.VBComponents) {
-                        $cm = $comp.CodeModule
-                        if ($cm.CountOfLines -gt 0) {
-                            $lineCount = $cm.CountOfLines
-                            for ($i = 1; $i -le $lineCount; $i++) {
-                                $line = $cm.Lines($i, 1)
-                                $newLine = $line
-                                foreach ($rule in $validRules) {
-                                    if ($newLine.Contains($rule.oldText)) {
-                                        $newLine = $newLine.Replace($rule.oldText, $rule.newText)
-                                        $fileLog.changesMade++
-                                        $totalReplacements++
-                                        $fileLog.details += "VBA Line $i in '$($comp.Name)': '$($rule.oldText)' -> '$($rule.newText)'"
-                                    }
-                                }
-                                if ($newLine -ne $line) {
-                                    $cm.ReplaceLine($i, $newLine)
-                                    $fileModified = $true
-                                }
-                            }
-                        }
-                    }
-                } catch {
-                    $fileLog.details += "VBA access warning: $_"
-                }
-            }
-
-            if ($fileModified) {
-                $wb.Save()
-                $fileLog.status = "Updated"
-                $updatedFilesCount++
-            } else {
-                $fileLog.status = "No Changes"
-            }
-
-            $wb.Close($false)
-            [System.Runtime.Interopservices.Marshal]::ReleaseComObject($wb) | Out-Null
-        } catch {
-            $fileLog.status = "Error"
-            $fileLog.details += "File error: $_"
-        }
-
-        $updateLog += $fileLog
+    # Initialize hardened isolated Excel instance
+    $iso = $null
+    try {
+        $iso = New-IsolatedExcelInstance
+    } catch {
+        Set-ProgressState $false "update" 0 0 ""
+        return @{ success = $false; error = "Could not initialize isolated Excel instance: $_" }
     }
 
-    Cleanup-ExcelCOM $excel
-    Set-ProgressState $false "update" $totalCount $totalCount "Güncelleme Tamamlandı!"
+    $excel = $iso.Excel
+    $processedCount = 0
+    $committedFiles = @()
+    $hasFatalFileError = $false
+
+    try {
+        foreach ($file in $files) {
+            $processedCount++
+            Set-ProgressState $true "update" $processedCount $totalCount $file.Name
+
+            $fileLog = @{
+                fileName = $file.Name
+                filePath = $file.FullName
+                status = "Skipped"
+                changesMade = 0
+                details = @()
+                initialHash = ""
+                finalHash = ""
+            }
+
+            $stagingPath = $null
+            $wb = $null
+
+            try {
+                # 1. Capture initial hash of original file
+                $initialHash = Get-FileSha256 $file.FullName
+                $fileLog.initialHash = $initialHash
+                $fileLog.finalHash = $initialHash
+
+                # 2. Create staging copy on same volume
+                $stagingRes = New-StagingFile -OriginalFilePath $file.FullName -OperationId $opId
+                if (-not $stagingRes.Success) {
+                    throw "Failed to create staging file: $($stagingRes.Error)"
+                }
+                $stagingPath = $stagingRes.StagingPath
+
+                # 3. Open staging file in isolated Excel instance (read-write)
+                $wb = $excel.Workbooks.Open($stagingPath, 0, $false)
+                $fileModified = $false
+
+                # 4. Capture pre-update semantic snapshot
+                $preSnapshot = Get-WorkbookSnapshot -Workbook $wb
+
+                # 5. Apply Power Queries replacement
+                if ($updatePowerQueries) {
+                    try {
+                        if ($wb.Queries) {
+                            foreach ($q in $wb.Queries) {
+                                $formula = $q.Formula
+                                if ($formula) {
+                                    $rep = Invoke-SafeReplacement -InputText $formula -Rules $validRules
+                                    if ($rep.MatchCount -gt 0) {
+                                        $q.Formula = $rep.ResultText
+                                        $fileModified = $true
+                                        $fileLog.changesMade += $rep.MatchCount
+                                        $totalReplacements += $rep.MatchCount
+                                        $fileLog.details += "PowerQuery '$($q.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        $fileLog.details += "PowerQuery warning: $_"
+                    }
+                }
+
+                # 6. Apply Data Connections replacement
+                if ($updateConnections) {
+                    try {
+                        if ($wb.Connections) {
+                            foreach ($conn in $wb.Connections) {
+                                # NOTE: Connection name is NOT modified (preserved immutable)
+                                if ($conn.OLEDBConnection) {
+                                    try {
+                                        $cStr = $conn.OLEDBConnection.ConnectionString
+                                        if ($cStr) {
+                                            $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
+                                            if ($rep.MatchCount -gt 0) {
+                                                $conn.OLEDBConnection.ConnectionString = $rep.ResultText
+                                                $fileModified = $true
+                                                $fileLog.changesMade += $rep.MatchCount
+                                                $totalReplacements += $rep.MatchCount
+                                                $fileLog.details += "OLEDB ConnStr in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                            }
+                                        }
+                                        $cmd = $conn.OLEDBConnection.CommandText
+                                        if ($cmd) {
+                                            $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
+                                            if ($rep.MatchCount -gt 0) {
+                                                $conn.OLEDBConnection.CommandText = $rep.ResultText
+                                                $fileModified = $true
+                                                $fileLog.changesMade += $rep.MatchCount
+                                                $totalReplacements += $rep.MatchCount
+                                                $fileLog.details += "OLEDB CommandText in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                            }
+                                        }
+                                    } catch { }
+                                }
+
+                                if ($conn.ODBCConnection) {
+                                    try {
+                                        $cStr = $conn.ODBCConnection.ConnectionString
+                                        if ($cStr) {
+                                            $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
+                                            if ($rep.MatchCount -gt 0) {
+                                                $conn.ODBCConnection.ConnectionString = $rep.ResultText
+                                                $fileModified = $true
+                                                $fileLog.changesMade += $rep.MatchCount
+                                                $totalReplacements += $rep.MatchCount
+                                                $fileLog.details += "ODBC ConnStr in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                            }
+                                        }
+                                        $cmd = $conn.ODBCConnection.CommandText
+                                        if ($cmd) {
+                                            $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
+                                            if ($rep.MatchCount -gt 0) {
+                                                $conn.ODBCConnection.CommandText = $rep.ResultText
+                                                $fileModified = $true
+                                                $fileLog.changesMade += $rep.MatchCount
+                                                $totalReplacements += $rep.MatchCount
+                                                $fileLog.details += "ODBC CommandText in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                            }
+                                        }
+                                    } catch { }
+                                }
+                            }
+                        }
+                    } catch {
+                        $fileLog.details += "Connection warning: $_"
+                    }
+                }
+
+                # 7. Apply QueryTables replacement
+                if ($updateConnections) {
+                    try {
+                        if ($wb.Worksheets) {
+                            foreach ($ws in $wb.Worksheets) {
+                                if ($ws.QueryTables) {
+                                    foreach ($qt in $ws.QueryTables) {
+                                        try {
+                                            $qtConn = $qt.Connection
+                                            if ($qtConn) {
+                                                $rep = Invoke-SafeReplacement -InputText $qtConn -Rules $validRules
+                                                if ($rep.MatchCount -gt 0) {
+                                                    $qt.Connection = $rep.ResultText
+                                                    $fileModified = $true
+                                                    $fileLog.changesMade += $rep.MatchCount
+                                                    $totalReplacements += $rep.MatchCount
+                                                    $fileLog.details += "QueryTable in '$($ws.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                                }
+                                            }
+                                        } catch { }
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+                }
+
+                # 8. Apply VBA Macros replacement
+                if ($updateVba -and ($file.Extension.ToLower() -in @(".xlsm", ".xlsb"))) {
+                    if ($preSnapshot.IsVbaSigned) {
+                        $fileLog.details += "WARNING: VBA Project is digitally signed. Skipped VBA modification to prevent signature invalidation."
+                    } else {
+                        try {
+                            if ($wb.VBProject.Protection -eq 1) {
+                                $fileLog.details += "WARNING: VBA Project is password-protected/locked. Skipped VBA modification."
+                            } else {
+                                foreach ($comp in $wb.VBProject.VBComponents) {
+                                    $cm = $comp.CodeModule
+                                    if ($cm -and $cm.CountOfLines -gt 0) {
+                                        $lineCount = $cm.CountOfLines
+                                        for ($i = 1; $i -le $lineCount; $i++) {
+                                            $line = $cm.Lines($i, 1)
+                                            $rep = Invoke-SafeReplacement -InputText $line -Rules $validRules
+                                            if ($rep.MatchCount -gt 0) {
+                                                $cm.ReplaceLine($i, $rep.ResultText)
+                                                $fileModified = $true
+                                                $fileLog.changesMade += $rep.MatchCount
+                                                $totalReplacements += $rep.MatchCount
+                                                $fileLog.details += "VBA Line $i in '$($comp.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {
+                            $fileLog.details += "VBA access warning: $_"
+                        }
+                    }
+                }
+
+                if (-not $fileModified) {
+                    $wb.Close($false)
+                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null
+                    $wb = $null
+                    Remove-StagingFile -StagingPath $stagingPath
+                    $fileLog.status = "No Changes"
+                } else {
+                    # 9. Save staging workbook
+                    $wb.Save()
+                    $wb.Close($false)
+                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null
+                    $wb = $null
+
+                    # 10. Reopen staging workbook ReadOnly to verify integrity and semantic snapshot
+                    $verifyWb = $excel.Workbooks.Open($stagingPath, 0, $true)
+                    $postSnapshot = Get-WorkbookSnapshot -Workbook $verifyWb
+                    $verifyWb.Close($false)
+                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($verifyWb) | Out-Null
+                    $verifyWb = $null
+
+                    $cmp = Compare-WorkbookSnapshot -PreSnapshot $preSnapshot -PostSnapshot $postSnapshot
+                    if (-not $cmp.IsValid) {
+                        throw "Semantic validation failed on staged workbook: $($cmp.Errors -join '; ')"
+                    }
+
+                    # 11. Commit staging file using guarded Commit-StagingWorkbook
+                    $commitRes = Commit-StagingWorkbook -StagingPath $stagingPath -OriginalPath $file.FullName -InitialHash $initialHash -OperationId $opId
+                    if (-not $commitRes.Success) {
+                        throw "Commit failed: $($commitRes.Error) (Code: $($commitRes.ErrorCode))"
+                    }
+
+                    $fileLog.status = "Updated"
+                    $fileLog.finalHash = $commitRes.FinalHash
+                    $fileLog.details += "Committed via $($commitRes.Method). Verified SHA256: $($commitRes.FinalHash)"
+                    $updatedFilesCount++
+                    $committedFiles += $file.FullName
+                }
+            } catch {
+                $hasFatalFileError = $true
+                $fileLog.status = "Error"
+                $fileLog.details += "File error: $_"
+
+                if ($wb) {
+                    try { $wb.Close($false) } catch { }
+                    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null } catch { }
+                    $wb = $null
+                }
+                if ($stagingPath -and (Test-Path -LiteralPath $stagingPath)) {
+                    Remove-StagingFile -StagingPath $stagingPath
+                }
+
+                # If atomicBatch is enabled, stop immediately on first error
+                if ($atomicBatch) {
+                    $updateLog += $fileLog
+                    break
+                }
+            }
+
+            $updateLog += $fileLog
+        }
+    } finally {
+        # Restore isolation settings and safely terminate isolated instance
+        if ($iso) {
+            Close-IsolatedExcelInstance -IsolationContext $iso
+        }
+    }
+
+    # 12. Transaction Rollback if atomicBatch is requested and an error occurred
+    $batchRolledBack = $false
+    if ($atomicBatch -and $hasFatalFileError -and $backupDir) {
+        Set-ProgressState $false "update" $processedCount $totalCount "Hata tespit edildi! Toplu işlem geri alınıyor (Rollback)..."
+        $restoreRes = Restore-BatchBackup -BackupDir $backupDir -TargetDir $DirectoryPath
+        $batchRolledBack = $true
+        return @{
+            success = $false
+            error = "İşlem sırasında bir dosyada hata oluştu. Veri güvenliği gereği tüm değişiklikler geri alındı (Batch Rollback)."
+            batchStatus = "ROLLED_BACK"
+            directory = $DirectoryPath
+            totalFilesProcessed = $processedCount
+            updatedFilesCount = 0
+            totalReplacements = 0
+            logs = $updateLog
+            backupDirectory = $backupDir
+        }
+    }
+
+    $overallSuccess = (-not $hasFatalFileError)
+    $msg = if ($overallSuccess) { "Güncelleme Tamamlandı!" } else { "Güncelleme hatalarla tamamlandı." }
+    Set-ProgressState $false "update" $totalCount $totalCount $msg
 
     return @{
-        success = $true
+        success = $overallSuccess
+        batchStatus = if ($overallSuccess) { "COMMITTED" } else { "PARTIAL_ERROR" }
         directory = $DirectoryPath
         totalFilesProcessed = $files.Count
         updatedFilesCount = $updatedFilesCount
         totalReplacements = $totalReplacements
         logs = $updateLog
+        backupDirectory = $backupDir
     }
 }

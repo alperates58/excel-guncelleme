@@ -25,9 +25,12 @@ try {
         $ws = $wb.Worksheets.Item(1)
         $ws.Name = "DataSheet"
         $ws.Cells.Item(1, 1).Value2 = "Server"
-        $ws.Cells.Item(1, 2).Value2 = "192.168.1.1"
+        $ws.Cells.Item(1, 2).Value2 = "192.168.1.50"
         $ws.Cells.Item(2, 1).Value2 = "Formula"
         $ws.Cells.Item(2, 2).Formula = '="Connected to " & B1'
+        try {
+            $wb.Queries.Add("TestQuery", 'let Source = Sql.Database("192.168.1.50", "TestDB") in Source', "Test SQL Query") | Out-Null
+        } catch { }
         $wb.SaveAs($normFile, 51) # 51 = xlOpenXMLWorkbook (.xlsx)
         $wb.Close($false)
         [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null

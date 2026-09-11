@@ -255,3 +255,143 @@ $binFixture = Join-Path $fixtureDir "test_binary.xlsb"
 Assert-True (Test-Path $normFixture) "test_xlsx_format fixture exists"
 Assert-True (Test-Path $macroFixture) "test_xlsm_format fixture exists"
 Assert-True (Test-Path $binFixture) "test_xlsb_format fixture exists"
+
+# ------------------------------------------------------------------------------
+# 14. test_commit_staging_success
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 14] test_commit_staging_success --" -ForegroundColor Magenta
+$targetFile = Join-Path $workDir "target_commit_success.txt"
+"Original data before commit" | Set-Content $targetFile -Encoding UTF8
+$initHash = Get-FileSha256 $targetFile
+
+$stageFile = Join-Path $workDir "stage_commit_success.txt"
+"New data committed safely" | Set-Content $stageFile -Encoding UTF8
+$expectedStageHash = Get-FileSha256 $stageFile
+
+$cRes = Commit-StagingWorkbook -StagingPath $stageFile -OriginalPath $targetFile -InitialHash $initHash
+Assert-True $cRes.Success "Commit-StagingWorkbook should succeed"
+Assert-Equal $cRes.FinalHash $expectedStageHash "Committed file final hash must match staging hash"
+Assert-Equal (Get-Content $targetFile -Raw).Trim() "New data committed safely" "Target content updated"
+Assert-False (Test-Path $stageFile) "Staging file must be cleaned/consumed after commit"
+
+# ------------------------------------------------------------------------------
+# 15. test_batch_rollback
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 15] test_batch_rollback --" -ForegroundColor Magenta
+$batchTestDir = Join-Path $workDir "batch_test_dir"
+if (-not (Test-Path $batchTestDir)) { New-Item -ItemType Directory -Path $batchTestDir -Force | Out-Null }
+$f1 = Join-Path $batchTestDir "f1.xlsx"
+$f2 = Join-Path $batchTestDir "f2.xlsx"
+"Dummy content 1" | Set-Content $f1 -Encoding UTF8
+"Dummy content 2" | Set-Content $f2 -Encoding UTF8
+$f1Hash = Get-FileSha256 $f1
+$f2Hash = Get-FileSha256 $f2
+
+$bRes = Create-ExcelBackup -DirectoryPath $batchTestDir
+Assert-True $bRes.success "Batch backup created successfully"
+
+# Simulate corruption / unwanted modification in batch
+"Corrupted content 1" | Set-Content $f1 -Encoding UTF8
+Remove-Item $f2 -Force
+
+$rRes = Restore-BatchBackup -BackupDir $bRes.backupDirectory -TargetDir $batchTestDir
+Assert-True $rRes.Success "Restore-BatchBackup should succeed"
+Assert-Equal (Get-FileSha256 $f1) $f1Hash "f1 restored to exact initial hash"
+Assert-True (Test-Path $f2) "f2 restored from backup"
+Assert-Equal (Get-FileSha256 $f2) $f2Hash "f2 restored to exact initial hash"
+
+# ------------------------------------------------------------------------------
+# 16. test_update_excel_directory_synthetic
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 16] test_update_excel_directory_synthetic --" -ForegroundColor Magenta
+$integDir = Join-Path $workDir "integ_test_dir"
+if (Test-Path $integDir) { Remove-Item $integDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $integDir -Force | Out-Null
+
+$testNormDst = Join-Path $integDir "test_norm.xlsx"
+$excelGen = New-Object -ComObject Excel.Application
+$excelGen.Visible = $false
+$excelGen.DisplayAlerts = $false
+$wbGen = $excelGen.Workbooks.Add()
+$wbGen.Queries.Add("TestQuery", 'let Source = Sql.Database("192.168.1.50", "TestDB") in Source', "Test SQL Query") | Out-Null
+$wbGen.SaveAs($testNormDst, 51)
+$wbGen.Close($false)
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($wbGen) | Out-Null
+$excelGen.Quit()
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($excelGen) | Out-Null
+
+$integInitHash = Get-FileSha256 $testNormDst
+
+$rules = @(
+    @{ oldText = "192.168.1.50"; newText = "10.0.0.1" }
+)
+$options = @{
+    autoBackup = $true
+    atomicBatch = $true
+    updateConnections = $true
+    updateQueries = $true
+    updateVba = $false
+}
+
+$upRes = Update-ExcelDirectory -DirectoryPath $integDir -Rules $rules -Options $options
+Assert-True $upRes.success "Update-ExcelDirectory returns success"
+Assert-Equal $upRes.batchStatus "COMMITTED" "Batch status is COMMITTED"
+Assert-Equal $upRes.updatedFilesCount 1 "Exactly 1 file updated"
+Assert-True ($upRes.totalReplacements -gt 0) "Replacements made > 0"
+
+$integFinalHash = Get-FileSha256 $testNormDst
+Assert-False ($integInitHash -eq $integFinalHash) "File hash changed after update"
+Assert-True (Test-Path $upRes.backupDirectory) "Backup directory created"
+
+# ------------------------------------------------------------------------------
+# 17. test_atomic_batch_preflight_abort
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 17] test_atomic_batch_preflight_abort --" -ForegroundColor Magenta
+$batchFailDir = Join-Path $workDir "batch_fail_test_dir"
+if (Test-Path $batchFailDir) { Remove-Item $batchFailDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $batchFailDir -Force | Out-Null
+
+$fGood = Join-Path $batchFailDir "1_good.xlsx"
+$excelGen = New-Object -ComObject Excel.Application
+$excelGen.Visible = $false
+$excelGen.DisplayAlerts = $false
+$wbGen = $excelGen.Workbooks.Add()
+$wbGen.Queries.Add("GoodQuery", 'let Source = "192.168.1.50" in Source', "Test SQL Query") | Out-Null
+$wbGen.SaveAs($fGood, 51)
+$wbGen.Close($false)
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($wbGen) | Out-Null
+$excelGen.Quit()
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($excelGen) | Out-Null
+
+$fGoodInitHash = Get-FileSha256 $fGood
+
+# Second file is locked so Test-FileWritable fails
+$fBad = Join-Path $batchFailDir "2_bad.xlsx"
+"Dummy bad content" | Set-Content $fBad -Encoding UTF8
+
+$lockStream = [System.IO.File]::Open($fBad, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+
+try {
+    $rules = @(
+        @{ oldText = "192.168.1.50"; newText = "10.0.0.1" }
+    )
+    $options = @{
+        autoBackup = $true
+        atomicBatch = $true
+        updateConnections = $true
+        updateQueries = $true
+        updateVba = $false
+    }
+
+    $failRes = Update-ExcelDirectory -DirectoryPath $batchFailDir -Rules $rules -Options $options
+    Assert-False $failRes.success "Batch with locked file must fail pre-flight"
+    Assert-Equal (Get-FileSha256 $fGood) $fGoodInitHash "First file must remain untouched after pre-flight abort"
+} finally {
+    if ($lockStream) {
+        $lockStream.Close()
+        $lockStream.Dispose()
+    }
+}
+
+
+
