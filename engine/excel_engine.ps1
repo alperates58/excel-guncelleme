@@ -583,6 +583,176 @@ function Close-IsolatedExcelInstance ($excelContext) {
     }
 }
 
+function Get-WorkbookSnapshot ($Workbook, [bool]$HasVba = $false) {
+    if ($null -eq $Workbook) { return $null }
+
+    $sheetNames = @()
+    try {
+        foreach ($s in $Workbook.Worksheets) {
+            $sheetNames += $s.Name
+        }
+    } catch { }
+
+    $queryNames = @()
+    try {
+        foreach ($q in $Workbook.Queries) {
+            $queryNames += $q.Name
+        }
+    } catch { }
+
+    $connNames = @()
+    try {
+        foreach ($c in $Workbook.Connections) {
+            $connNames += $c.Name
+        }
+    } catch { }
+
+    $vbaModules = @()
+    $isVbaSigned = $false
+    $vbaAccessible = $true
+    if ($HasVba) {
+        try {
+            foreach ($comp in $Workbook.VBProject.VBComponents) {
+                $vbaModules += $comp.Name
+            }
+            try {
+                if ($Workbook.VBProject.Signature) {
+                    $isVbaSigned = $true
+                }
+            } catch { }
+        } catch {
+            $vbaAccessible = $false
+        }
+    }
+
+    $format = 0
+    try { $format = $Workbook.FileFormat } catch { }
+
+    $date1904 = $false
+    try { $date1904 = $Workbook.Date1904 } catch { }
+
+    $precision = $false
+    try { $precision = $Workbook.PrecisionAsDisplayed } catch { }
+
+    return @{
+        FileFormat = $format
+        WorksheetsCount = $sheetNames.Count
+        WorksheetNames = $sheetNames
+        QueriesCount = $queryNames.Count
+        QueryNames = $queryNames
+        ConnectionsCount = $connNames.Count
+        ConnectionNames = $connNames
+        HasVba = $HasVba
+        VbaAccessible = $vbaAccessible
+        VbaModulesCount = if ($vbaAccessible) { $vbaModules.Count } else { -1 }
+        VbaModuleNames = $vbaModules
+        IsVbaSigned = $isVbaSigned
+        Date1904 = $date1904
+        PrecisionAsDisplayed = $precision
+    }
+}
+
+function Compare-WorkbookSnapshot ($PreSnapshot, $PostSnapshot) {
+    if ($null -eq $PreSnapshot -or $null -eq $PostSnapshot) {
+        return @{
+            IsValid = $false
+            ErrorCode = "NULL_SNAPSHOT"
+            Message = "Karşılaştırma için geçerli snapshot bulunamadı."
+            Differences = @("Snapshot verisi boş")
+        }
+    }
+
+    $diffs = @()
+
+    # 1. FileFormat
+    if ($PreSnapshot.FileFormat -ne $PostSnapshot.FileFormat) {
+        $diffs += "Dosya formatı değişti: Eski $($PreSnapshot.FileFormat), Yeni $($PostSnapshot.FileFormat)"
+        return @{
+            IsValid = $false
+            ErrorCode = "VALIDATION_FAILED_FILE_FORMAT"
+            Message = "Dosya format dönüşümüne uğradı!"
+            Differences = $diffs
+        }
+    }
+
+    # 2. Worksheet count and names
+    if ($PreSnapshot.WorksheetsCount -ne $PostSnapshot.WorksheetsCount) {
+        $diffs += "Çalışma sayfası sayısı değişti: Eski $($PreSnapshot.WorksheetsCount), Yeni $($PostSnapshot.WorksheetsCount)"
+    } else {
+        for ($i = 0; $i -lt $PreSnapshot.WorksheetsCount; $i++) {
+            if ($PreSnapshot.WorksheetNames[$i] -ne $PostSnapshot.WorksheetNames[$i]) {
+                $diffs += "Sayfa adı değişti: '$($PreSnapshot.WorksheetNames[$i])' -> '$($PostSnapshot.WorksheetNames[$i])'"
+            }
+        }
+    }
+    if ($diffs.Count -gt 0) {
+        return @{
+            IsValid = $false
+            ErrorCode = "VALIDATION_FAILED_WORKSHEET_IDENTITY"
+            Message = "Çalışma sayfalarında beklenmeyen yapısal değişim tespit edildi."
+            Differences = $diffs
+        }
+    }
+
+    # 3. Query count and names
+    if ($PreSnapshot.QueriesCount -ne $PostSnapshot.QueriesCount) {
+        $diffs += "Power Query sayısı değişti: Eski $($PreSnapshot.QueriesCount), Yeni $($PostSnapshot.QueriesCount)"
+    } else {
+        for ($i = 0; $i -lt $PreSnapshot.QueriesCount; $i++) {
+            if ($PreSnapshot.QueryNames[$i] -ne $PostSnapshot.QueryNames[$i]) {
+                $diffs += "Sorgu adı değişti: '$($PreSnapshot.QueryNames[$i])' -> '$($PostSnapshot.QueryNames[$i])'"
+            }
+        }
+    }
+    if ($diffs.Count -gt 0) {
+        return @{
+            IsValid = $false
+            ErrorCode = "VALIDATION_FAILED_QUERY_IDENTITY"
+            Message = "Power Query kimliklerinde beklenmeyen yapısal değişim tespit edildi."
+            Differences = $diffs
+        }
+    }
+
+    # 4. Connection count and names (MUST BE IMMUTABLE)
+    if ($PreSnapshot.ConnectionsCount -ne $PostSnapshot.ConnectionsCount) {
+        $diffs += "Bağlantı sayısı değişti: Eski $($PreSnapshot.ConnectionsCount), Yeni $($PostSnapshot.ConnectionsCount)"
+    } else {
+        for ($i = 0; $i -lt $PreSnapshot.ConnectionsCount; $i++) {
+            if ($PreSnapshot.ConnectionNames[$i] -ne $PostSnapshot.ConnectionNames[$i]) {
+                $diffs += "Bağlantı adı değişti: '$($PreSnapshot.ConnectionNames[$i])' -> '$($PostSnapshot.ConnectionNames[$i])'"
+            }
+        }
+    }
+    if ($diffs.Count -gt 0) {
+        return @{
+            IsValid = $false
+            ErrorCode = "VALIDATION_FAILED_CONNECTION_IDENTITY"
+            Message = "Veri bağlantı kimliği/adı değiştirilemez! Orijinal bağlantı adları korunmalıdır."
+            Differences = $diffs
+        }
+    }
+
+    # 5. VBA structure
+    if ($PreSnapshot.HasVba -and $PreSnapshot.VbaAccessible -and $PostSnapshot.VbaAccessible) {
+        if ($PreSnapshot.VbaModulesCount -ne $PostSnapshot.VbaModulesCount) {
+            $diffs += "VBA modül sayısı değişti: Eski $($PreSnapshot.VbaModulesCount), Yeni $($PostSnapshot.VbaModulesCount)"
+            return @{
+                IsValid = $false
+                ErrorCode = "VALIDATION_FAILED_VBA_STRUCTURE"
+                Message = "VBA modül yapısında bozulma tespit edildi."
+                Differences = $diffs
+            }
+        }
+    }
+
+    return @{
+        IsValid = $true
+        ErrorCode = "NONE"
+        Message = "Semantik snapshot doğrulaması başarılı."
+        Differences = @()
+    }
+}
+
 function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()

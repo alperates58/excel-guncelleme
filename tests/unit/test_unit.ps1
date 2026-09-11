@@ -89,12 +89,71 @@ if (Get-Command "Invoke-SafeReplacement" -ErrorAction SilentlyContinue) {
 # ------------------------------------------------------------------------------
 # 6. test_connection_name_immutable
 # ------------------------------------------------------------------------------
-Write-Host "`n-- [TEST 6] test_connection_name_immutable --" -ForegroundColor Magenta
-if (Get-Command "Get-WorkbookSnapshot" -ErrorAction SilentlyContinue) {
-    # Will test that connection name does not mutate in snapshot
-    Assert-True $true "test_connection_name_immutable harness ready"
+Write-Host "`n-- [TEST 6] test_connection_name_immutable & semantic snapshots --" -ForegroundColor Magenta
+if (Get-Command "Compare-WorkbookSnapshot" -ErrorAction SilentlyContinue) {
+    $snapA = @{
+        FileFormat = 52
+        WorksheetsCount = 2
+        WorksheetNames = @("Sheet1", "Sheet2")
+        QueriesCount = 1
+        QueryNames = @("Query1")
+        ConnectionsCount = 1
+        ConnectionNames = @("SQL_Conn_192.168.1.1")
+        HasVba = $true
+        VbaAccessible = $true
+        VbaModulesCount = 1
+    }
+    # Clone snapshot
+    $snapMatching = @{
+        FileFormat = 52
+        WorksheetsCount = 2
+        WorksheetNames = @("Sheet1", "Sheet2")
+        QueriesCount = 1
+        QueryNames = @("Query1")
+        ConnectionsCount = 1
+        ConnectionNames = @("SQL_Conn_192.168.1.1")
+        HasVba = $true
+        VbaAccessible = $true
+        VbaModulesCount = 1
+    }
+    $cmpIdentical = Compare-WorkbookSnapshot $snapA $snapMatching
+    Assert-True $cmpIdentical.IsValid "Identical snapshot comparison is valid"
+
+    # Test mutated connection name (should FAIL with VALIDATION_FAILED_CONNECTION_IDENTITY)
+    $snapMutatedConn = @{
+        FileFormat = 52
+        WorksheetsCount = 2
+        WorksheetNames = @("Sheet1", "Sheet2")
+        QueriesCount = 1
+        QueryNames = @("Query1")
+        ConnectionsCount = 1
+        ConnectionNames = @("SQL_Conn_10.0.0.1") # Mutated!
+        HasVba = $true
+        VbaAccessible = $true
+        VbaModulesCount = 1
+    }
+    $cmpMutatedConn = Compare-WorkbookSnapshot $snapA $snapMutatedConn
+    Assert-False $cmpMutatedConn.IsValid "Mutated connection name must fail validation"
+    Assert-Equal $cmpMutatedConn.ErrorCode "VALIDATION_FAILED_CONNECTION_IDENTITY" "test_connection_name_immutable error code"
+
+    # Test mutated file format (52 -> 51)
+    $snapMutatedFormat = @{
+        FileFormat = 51 # Stripped macros!
+        WorksheetsCount = 2
+        WorksheetNames = @("Sheet1", "Sheet2")
+        QueriesCount = 1
+        QueryNames = @("Query1")
+        ConnectionsCount = 1
+        ConnectionNames = @("SQL_Conn_192.168.1.1")
+        HasVba = $true
+        VbaAccessible = $true
+        VbaModulesCount = 1
+    }
+    $cmpMutatedFormat = Compare-WorkbookSnapshot $snapA $snapMutatedFormat
+    Assert-False $cmpMutatedFormat.IsValid "Mutated FileFormat must fail validation"
+    Assert-Equal $cmpMutatedFormat.ErrorCode "VALIDATION_FAILED_FILE_FORMAT" "Format change error code"
 } else {
-    Write-Host "  [SKIP] Get-WorkbookSnapshot not yet implemented" -ForegroundColor Yellow
+    Write-Host "  [SKIP] Compare-WorkbookSnapshot not yet implemented" -ForegroundColor Yellow
 }
 
 # ------------------------------------------------------------------------------
