@@ -38,7 +38,14 @@ if (Test-Path $intTestPath) {
     . $intTestPath
 }
 
-# 4. Post-Run Corporate Hash Check
+# 4. Run Remediation & Blocker Tests
+$remTestPath = Join-Path $PSScriptRoot "remediation\test_remediation_suite.ps1"
+if (Test-Path $remTestPath) {
+    Write-Host "`n[RUNNING] Remediation & Blocker Tests ($remTestPath)..." -ForegroundColor Yellow
+    . $remTestPath
+}
+
+# 5. Post-Run Corporate Hash Check
 Write-Host "`n[POST-CHECK] Verifying corporate fixture baseline hashes..." -ForegroundColor Yellow
 $postCheck = Assert-CorporateFilesUntouched $repoRoot
 if (-not $postCheck) {

@@ -586,6 +586,26 @@ function Close-IsolatedExcelInstance ($excelContext) {
         $app = $excelContext.App
         try {
             Restore-ExcelIsolation $excelContext
+            $wbs = $null
+            try {
+                $wbs = $app.Workbooks
+                if ($wbs) {
+                    for ($w = $wbs.Count; $w -ge 1; $w--) {
+                        try {
+                            $item = $wbs.Item($w)
+                            $item.Close($false)
+                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) | Out-Null
+                            $item = $null
+                        } catch { }
+                    }
+                }
+            } catch { }
+            finally {
+                if ($wbs) {
+                    try { [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($wbs) | Out-Null } catch { }
+                    $wbs = $null
+                }
+            }
             $app.Quit()
         } catch { }
         try {
@@ -596,30 +616,39 @@ function Close-IsolatedExcelInstance ($excelContext) {
         $excelContext.Excel = $null
     }
 
-    [System.GC]::Collect()
+    [System.GC]::Collect(2, [System.GCCollectionMode]::Forced, $true)
+    [System.GC]::WaitForPendingFinalizers()
+    [System.GC]::Collect(2, [System.GCCollectionMode]::Forced, $true)
     [System.GC]::WaitForPendingFinalizers()
 
-    # B) Wait for graceful exit, or as a LAST RESORT terminate only the verified, disambiguated PID
+    # B) Wait for graceful exit
     # Never kill if PID is 0 or ambiguous to protect user's open Excel documents
     if ($excelContext -and $excelContext.Pid -gt 0 -and (-not $excelContext.IsAmbiguousPid)) {
         $targetPid = $excelContext.Pid
-        $exitedCleanly = $false
-        for ($i = 0; $i -lt 25; $i++) {
-            Start-Sleep -Milliseconds 100
+        for ($i = 0; $i -lt 50; $i++) {
             $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
-            if (-not $p -or $p.HasExited) {
-                $exitedCleanly = $true
+            if (-not $p) { break }
+            if ($p.HasExited) {
+                $p.Dispose()
+                # Wait until PID is completely purged from OS process table
+                for ($v = 0; $v -lt 50; $v++) {
+                    $check = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+                    if (-not $check) { break }
+                    $check.Dispose()
+                    Start-Sleep -Milliseconds 100
+                }
                 break
             }
+            $p.Dispose()
+            Start-Sleep -Milliseconds 100
         }
 
-        if (-not $exitedCleanly) {
-            try {
-                $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
-                if ($p -and -not $p.HasExited) {
-                    $p.Kill()
-                }
-            } catch { }
+        # Final verification: ensure PID is null
+        for ($v = 0; $v -lt 30; $v++) {
+            $check = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+            if (-not $check) { break }
+            $check.Dispose()
+            Start-Sleep -Milliseconds 100
         }
     }
 
@@ -632,22 +661,49 @@ function Get-WorkbookSnapshot ($Workbook, [bool]$HasVba = $false) {
 
     $sheetNames = @()
     try {
-        foreach ($s in $Workbook.Worksheets) {
-            $sheetNames += $s.Name
+        $sheets = $Workbook.Worksheets
+        if ($sheets) {
+            $sheetCount = $sheets.Count
+            for ($i = 1; $i -le $sheetCount; $i++) {
+                $s = $sheets.Item($i)
+                if ($s) {
+                    $sheetNames += $s.Name
+                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($s) | Out-Null
+                }
+            }
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheets) | Out-Null
         }
     } catch { }
 
     $queryNames = @()
     try {
-        foreach ($q in $Workbook.Queries) {
-            $queryNames += $q.Name
+        $queries = $Workbook.Queries
+        if ($queries) {
+            $queryCount = $queries.Count
+            for ($i = 1; $i -le $queryCount; $i++) {
+                $q = $queries.Item($i)
+                if ($q) {
+                    $queryNames += $q.Name
+                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($q) | Out-Null
+                }
+            }
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($queries) | Out-Null
         }
     } catch { }
 
     $connNames = @()
     try {
-        foreach ($c in $Workbook.Connections) {
-            $connNames += $c.Name
+        $conns = $Workbook.Connections
+        if ($conns) {
+            $connCount = $conns.Count
+            for ($i = 1; $i -le $connCount; $i++) {
+                $c = $conns.Item($i)
+                if ($c) {
+                    $connNames += $c.Name
+                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($c) | Out-Null
+                }
+            }
+            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($conns) | Out-Null
         }
     } catch { }
 
@@ -656,14 +712,27 @@ function Get-WorkbookSnapshot ($Workbook, [bool]$HasVba = $false) {
     $vbaAccessible = $true
     if ($HasVba) {
         try {
-            foreach ($comp in $Workbook.VBProject.VBComponents) {
-                $vbaModules += $comp.Name
-            }
-            try {
-                if ($Workbook.VBProject.Signature) {
-                    $isVbaSigned = $true
+            $vbProj = $Workbook.VBProject
+            if ($vbProj) {
+                $comps = $vbProj.VBComponents
+                if ($comps) {
+                    $compCount = $comps.Count
+                    for ($i = 1; $i -le $compCount; $i++) {
+                        $comp = $comps.Item($i)
+                        if ($comp) {
+                            $vbaModules += $comp.Name
+                            [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($comp) | Out-Null
+                        }
+                    }
+                    [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($comps) | Out-Null
                 }
-            } catch { }
+                try {
+                    if ($vbProj.Signature) {
+                        $isVbaSigned = $true
+                    }
+                } catch { }
+                [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($vbProj) | Out-Null
+            }
         } catch {
             $vbaAccessible = $false
         }
