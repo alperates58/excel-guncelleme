@@ -836,6 +836,19 @@ function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
             $backedUpCount++
         }
 
+        # Write cryptographic backup manifest for integrity verification on restore
+        $manifest = @{
+            operationId = $opId
+            timestamp = $timestamp
+            directory = $DirectoryPath
+            totalFiles = $backedUpCount
+            files = $verifiedBackups
+        }
+        $manifestPath = Join-Path $backupDir "backup_manifest.json"
+        try {
+            $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        } catch { }
+
         return @{
             success = $true
             backupDirectory = $backupDir
@@ -1070,40 +1083,117 @@ function Restore-BatchBackup {
     )
 
     if (-not (Test-Path -LiteralPath $BackupDir)) {
-        return @{ Success = $false; Error = "Backup directory not found: $BackupDir" }
+        return @{
+            Success = $false
+            Error = "Backup directory not found: $BackupDir"
+            failedRestoreFiles = @()
+            RestoredCount = 0
+            Errors = @("Backup directory not found: $BackupDir")
+        }
     }
 
-    $backupFiles = Get-ChildItem -LiteralPath $BackupDir -File
+    $manifestPath = Join-Path $BackupDir "backup_manifest.json"
+    $manifestMap = @{}
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $manifestData = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($manifestData -and $manifestData.files) {
+                foreach ($f in $manifestData.files) {
+                    $leafName = Split-Path -Leaf $f.OriginalPath
+                    $manifestMap[$leafName] = $f.Sha256
+                }
+            }
+        } catch { }
+    }
+
+    $backupFiles = Get-ChildItem -LiteralPath $BackupDir -File | Where-Object { $_.Name -ne "backup_manifest.json" }
     $restoredCount = 0
+    $failedRestoreFiles = @()
     $errors = @()
 
     foreach ($bf in $backupFiles) {
         $targetFile = Join-Path $TargetDir $bf.Name
+        $expectedHash = if ($manifestMap.ContainsKey($bf.Name)) { $manifestMap[$bf.Name] } else { Get-FileSha256 $bf.FullName }
+        $bfCurrentHash = Get-FileSha256 $bf.FullName
+
+        # Pre-copy integrity check: verify backup file itself is not corrupted
+        if ($manifestMap.ContainsKey($bf.Name) -and ($bfCurrentHash -ne $expectedHash)) {
+            $failed = @{
+                OriginalPath = $targetFile
+                BackupPath = $bf.FullName
+                ExpectedHash = $expectedHash
+                CurrentHash = $bfCurrentHash
+                Error = "Backup file itself is corrupted (checksum mismatch with backup manifest)"
+            }
+            $failedRestoreFiles += $failed
+            $errors += "Backup file corrupted: $($bf.Name)"
+            continue
+        }
+
         try {
             Copy-Item -LiteralPath $bf.FullName -Destination $targetFile -Force
-            $bfHash = Get-FileSha256 $bf.FullName
+            if (-not (Test-Path -LiteralPath $targetFile)) {
+                $failed = @{
+                    OriginalPath = $targetFile
+                    BackupPath = $bf.FullName
+                    ExpectedHash = $expectedHash
+                    CurrentHash = $null
+                    Error = "Target file does not exist after restore copy"
+                }
+                $failedRestoreFiles += $failed
+                $errors += "File missing after copy: $($bf.Name)"
+                continue
+            }
+
+            $tfItem = Get-Item -LiteralPath $targetFile -Force
+            if ($tfItem.Length -ne $bf.Length -or $tfItem.Length -le 0) {
+                $failed = @{
+                    OriginalPath = $targetFile
+                    BackupPath = $bf.FullName
+                    ExpectedHash = $expectedHash
+                    CurrentHash = (Get-FileSha256 $targetFile)
+                    Error = "Length mismatch after copy: expected $($bf.Length), got $($tfItem.Length)"
+                }
+                $failedRestoreFiles += $failed
+                $errors += "Length mismatch after restoring $($bf.Name)"
+                continue
+            }
+
             $tfHash = Get-FileSha256 $targetFile
-            if ($bfHash -ne $tfHash) {
+            if ($expectedHash -ne $tfHash) {
+                $failed = @{
+                    OriginalPath = $targetFile
+                    BackupPath = $bf.FullName
+                    ExpectedHash = $expectedHash
+                    CurrentHash = $tfHash
+                    Error = "Checksum mismatch: expected $expectedHash, got $tfHash"
+                }
+                $failedRestoreFiles += $failed
                 $errors += "Checksum mismatch after restoring $($bf.Name)"
             } else {
                 $restoredCount++
             }
         } catch {
+            $failed = @{
+                OriginalPath = $targetFile
+                BackupPath = $bf.FullName
+                ExpectedHash = $expectedHash
+                CurrentHash = (Get-FileSha256 $targetFile)
+                Error = "$_"
+            }
+            $failedRestoreFiles += $failed
             $errors += "Failed to restore $($bf.Name): $_"
         }
     }
 
-    if ($errors.Count -gt 0) {
-        return @{
-            Success = $false
-            RestoredCount = $restoredCount
-            Errors = $errors
-        }
-    }
+    $isSuccess = ($failedRestoreFiles.Count -eq 0 -and $errors.Count -eq 0)
 
     return @{
-        Success = $true
+        Success = $isSuccess
         RestoredCount = $restoredCount
+        failedRestoreFiles = $failedRestoreFiles
+        Errors = $errors
+        Error = if (-not $isSuccess) { $errors -join "; " } else { $null }
     }
 }
 
@@ -1442,6 +1532,22 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
         Set-ProgressState $false "update" $processedCount $totalCount "Hata tespit edildi! Toplu işlem geri alınıyor (Rollback)..."
         $restoreRes = Restore-BatchBackup -BackupDir $backupDir -TargetDir $DirectoryPath
         $batchRolledBack = $true
+
+        if (-not $restoreRes.Success) {
+            return @{
+                success = $false
+                error = "İşlem sırasında bir dosyada hata oluştu ve yedekten geri yükleme (Rollback) kısmen başarısız oldu! Acil manuel müdahale gerekebilir: $($restoreRes.Errors -join '; ')"
+                batchStatus = "ROLLBACK_PARTIAL_FAILURE"
+                directory = $DirectoryPath
+                totalFilesProcessed = $processedCount
+                updatedFilesCount = 0
+                totalReplacements = 0
+                logs = $updateLog
+                backupDirectory = $backupDir
+                failedRestoreFiles = $restoreRes.failedRestoreFiles
+            }
+        }
+
         return @{
             success = $false
             error = "İşlem sırasında bir dosyada hata oluştu. Veri güvenliği gereği tüm değişiklikler geri alındı (Batch Rollback)."
@@ -1452,6 +1558,7 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options) {
             totalReplacements = 0
             logs = $updateLog
             backupDirectory = $backupDir
+            failedRestoreFiles = @()
         }
     }
 
