@@ -31,6 +31,12 @@ if (Test-Path $unitTestPath) {
     . $unitTestPath
 }
 
+$phase3UnitPath = Join-Path $PSScriptRoot "unit\test_phase3_suite.ps1"
+if (Test-Path $phase3UnitPath) {
+    Write-Host "`n[RUNNING] Phase 3 Operational Unit Tests ($phase3UnitPath)..." -ForegroundColor Yellow
+    . $phase3UnitPath
+}
+
 # 3. Run Integration Tests
 $intTestPath = Join-Path $PSScriptRoot "integration\test_integration.ps1"
 if (Test-Path $intTestPath) {

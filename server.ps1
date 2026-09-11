@@ -2,7 +2,8 @@
 # Excel SQL Server Connection & Macro Bulk Updater - Server & API Engine
 # ==============================================================================
 param(
-    [int]$Port = 3000
+    [int]$Port = 3000,
+    [switch]$NoBrowser
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -45,9 +46,11 @@ Write-Host " Excel Bulk Updater Server is running on http://127.0.0.1:$Port/" -F
 Write-Host " Open your browser to: http://127.0.0.1:$Port/" -ForegroundColor Yellow
 Write-Host "=================================================================" -ForegroundColor Green
 
-try {
-    Start-Process "http://127.0.0.1:$Port/"
-} catch { }
+if (-not $NoBrowser -and -not $env:EXCEL_UPDATER_NO_BROWSER) {
+    try {
+        Start-Process "http://127.0.0.1:$Port/"
+    } catch { }
+}
 
 $publicDir = Join-Path $PSScriptRoot "public"
 
@@ -77,12 +80,15 @@ function Send-JsonResponse ($response, $object, [int]$statusCode = 200) {
 }
 
 function Read-RequestBody ($request) {
-    $reader = New-Object System.IO.StreamReader($request.InputStream, $request.ContentEncoding)
-    $body = $reader.ReadToEnd()
-    $reader.Close()
-    if (-not [string]::IsNullOrWhiteSpace($body)) {
-        return $body | ConvertFrom-Json
-    }
+    try {
+        $encoding = if ($request.ContentEncoding) { $request.ContentEncoding } else { [System.Text.Encoding]::UTF8 }
+        $reader = New-Object System.IO.StreamReader($request.InputStream, $encoding)
+        $body = $reader.ReadToEnd()
+        $reader.Close()
+        if (-not [string]::IsNullOrWhiteSpace($body)) {
+            return $body | ConvertFrom-Json
+        }
+    } catch { }
     return $null
 }
 
@@ -132,9 +138,17 @@ while ($listener.IsListening) {
             continue
         }
 
+        if ($path -eq "/api/shutdown" -and $request.HttpMethod -eq "POST") {
+            Send-JsonResponse $response @{ success = $true; message = "Server shutting down" }
+            Start-Sleep -Milliseconds 100
+            try { $listener.Stop() } catch { }
+            break
+        }
+
         if ($path -eq "/api/progress") {
-            if ($global:ActiveOperationId) {
-                $snap = Get-OperationSnapshot $global:ActiveOperationId
+            $currentActiveId = Get-ActiveOperationId
+            if ($currentActiveId) {
+                $snap = Get-OperationSnapshot $currentActiveId
                 if ($snap) {
                     $compatProgress = @{
                         active = $true
@@ -160,8 +174,9 @@ while ($listener.IsListening) {
         # OPERATION MANAGEMENT & ASYNC WORKER ENDPOINTS
         # ----------------------------------------------------------------------
         if ($path -eq "/api/operations/active" -and $request.HttpMethod -eq "GET") {
-            if ($global:ActiveOperationId) {
-                $snap = Get-OperationSnapshot $global:ActiveOperationId
+            $currentActiveId = Get-ActiveOperationId
+            if ($currentActiveId) {
+                $snap = Get-OperationSnapshot $currentActiveId
                 Send-JsonResponse $response @{ active = $true; operation = $snap }
             } else {
                 Send-JsonResponse $response @{ active = $false }
@@ -211,19 +226,32 @@ while ($listener.IsListening) {
 
             $backupsList = @()
             if (Test-Path -LiteralPath $targetDir) {
-                $backupRootDir = Join-Path $targetDir "_ExcelUpdater_Backups"
-                if (Test-Path -LiteralPath $backupRootDir) {
-                    $manifests = Get-ChildItem -LiteralPath $backupRootDir -Filter "manifest.json" -Recurse -File -ErrorAction SilentlyContinue
-                    foreach ($m in $manifests) {
+                $searchRoots = @($targetDir)
+                $parentDir = Split-Path -Parent $targetDir
+                if ($parentDir -and (Test-Path -LiteralPath $parentDir)) {
+                    $searchRoots += $parentDir
+                }
+
+                $candidateDirs = @()
+                foreach ($root in $searchRoots) {
+                    $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "*_ExcelUpdater_Backups*" -ErrorAction SilentlyContinue
+                    if ($dirs) { $candidateDirs += $dirs }
+                }
+
+                foreach ($bDir in ($candidateDirs | Select-Object -Unique)) {
+                    $mFile = Join-Path $bDir.FullName "backup_manifest.json"
+                    if (-not (Test-Path -LiteralPath $mFile)) {
+                        $mFile = Join-Path $bDir.FullName "manifest.json"
+                    }
+                    if (Test-Path -LiteralPath $mFile) {
                         try {
-                            $jsonContent = Get-Content -LiteralPath $m.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-                            $bFolder = $m.Directory
+                            $jsonContent = Get-Content -LiteralPath $mFile -Raw -Encoding UTF8 | ConvertFrom-Json
                             $backupsList += @{
                                 timestamp = $jsonContent.timestamp
-                                backupDirectory = $bFolder.FullName
-                                folderName = $bFolder.Name
-                                fileCount = if ($jsonContent.files) { @($jsonContent.files).Count } else { 0 }
-                                operation = $jsonContent.operation
+                                backupDirectory = $bDir.FullName
+                                folderName = $bDir.Name
+                                fileCount = if ($jsonContent.files) { @($jsonContent.files).Count } else { if ($jsonContent.totalFiles) { $jsonContent.totalFiles } else { 0 } }
+                                operation = $jsonContent.operationId
                             }
                         } catch { }
                     }
@@ -244,7 +272,10 @@ while ($listener.IsListening) {
                 continue
             }
 
-            $manifestPath = Join-Path $backupDir "manifest.json"
+            $manifestPath = Join-Path $backupDir "backup_manifest.json"
+            if (-not (Test-Path -LiteralPath $manifestPath)) {
+                $manifestPath = Join-Path $backupDir "manifest.json"
+            }
             if (-not (Test-Path -LiteralPath $manifestPath)) {
                 Send-JsonResponse $response @{ success = $false; error = "Yedek klasöründe manifest.json bulunamadı: $backupDir" } 400
                 continue
@@ -468,5 +499,16 @@ while ($listener.IsListening) {
         }
     } catch {
         Write-Host "Request handling error: $_" -ForegroundColor Red
+        try {
+            if ($response -and $response.OutputStream) {
+                Send-JsonResponse $response @{ success = $false; error = "$_" } 500
+            }
+        } catch { }
     }
 }
+
+try {
+    $listener.Stop()
+    $listener.Close()
+} catch { }
+

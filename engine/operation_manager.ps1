@@ -5,14 +5,49 @@
 # Ensure concurrent collection types are available
 $null = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]
 
-# Global synchronization locks
-$global:OperationRegistryLock = [object]::new()
-$global:HistoryFileLock = [object]::new()
-$global:AuditLogLock = [object]::new()
+# Cross-Runspace synchronization locks stored in AppDomain for process-wide sharing
+$domainOpLock = [System.AppDomain]::CurrentDomain.GetData("OperationRegistryLock")
+if ($null -eq $domainOpLock) {
+    $domainOpLock = [object]::new()
+    [System.AppDomain]::CurrentDomain.SetData("OperationRegistryLock", $domainOpLock)
+}
+$global:OperationRegistryLock = $domainOpLock
 
-# Global in-memory registry for operation states
-if ($null -eq $global:OperationsRegistry) {
-    $global:OperationsRegistry = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+$domainHistLock = [System.AppDomain]::CurrentDomain.GetData("HistoryFileLock")
+if ($null -eq $domainHistLock) {
+    $domainHistLock = [object]::new()
+    [System.AppDomain]::CurrentDomain.SetData("HistoryFileLock", $domainHistLock)
+}
+$global:HistoryFileLock = $domainHistLock
+
+$domainAuditLock = [System.AppDomain]::CurrentDomain.GetData("AuditLogLock")
+if ($null -eq $domainAuditLock) {
+    $domainAuditLock = [object]::new()
+    [System.AppDomain]::CurrentDomain.SetData("AuditLogLock", $domainAuditLock)
+}
+$global:AuditLogLock = $domainAuditLock
+
+# Cross-Runspace in-memory registry for operation states stored in AppDomain
+$domainReg = [System.AppDomain]::CurrentDomain.GetData("OperationsRegistry")
+if ($null -eq $domainReg) {
+    $domainReg = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+    [System.AppDomain]::CurrentDomain.SetData("OperationsRegistry", $domainReg)
+}
+$global:OperationsRegistry = $domainReg
+
+function Get-ActiveOperationId () {
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        foreach ($key in $global:OperationsRegistry.Keys) {
+            $existing = $global:OperationsRegistry[$key]
+            if ($existing -and ($global:TERMINAL_OPERATION_STATES -notcontains $existing.status)) {
+                return $existing.operationId
+            }
+        }
+        return $null
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
 }
 
 # ------------------------------------------------------------------------------
@@ -180,9 +215,29 @@ function Register-Operation {
     param(
         [Parameter(Mandatory=$true)][string]$Type, # SCAN | PREVIEW | UPDATE | RESTORE
         [Parameter(Mandatory=$true)][string]$Directory,
-        [hashtable]$Options = @{},
-        [array]$Rules = @()
+        $Options = @{},
+        $Rules = @()
     )
+
+    $optHt = @{}
+    if ($Options -is [System.Collections.IDictionary] -or $Options -is [hashtable]) {
+        foreach ($k in $Options.Keys) { $optHt[$k] = $Options[$k] }
+    } elseif ($Options -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($prop in $Options.PSObject.Properties) { $optHt[$prop.Name] = $prop.Value }
+    }
+
+    $cleanRules = @()
+    if ($Rules) {
+        foreach ($r in $Rules) {
+            if ($r -is [System.Management.Automation.PSCustomObject]) {
+                $cleanRules += @{ oldText = "$($r.oldText)"; newText = "$($r.newText)" }
+            } elseif ($r -is [hashtable] -or $r -is [System.Collections.IDictionary]) {
+                $cleanRules += @{ oldText = "$($r.oldText)"; newText = "$($r.newText)" }
+            } else {
+                $cleanRules += $r
+            }
+        }
+    }
 
     [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
     try {
@@ -227,8 +282,8 @@ function Register-Operation {
             backupDirectory = ""
             batchStatus = "PENDING"
             cancelRequested = $false
-            options = $Options
-            rules = $Rules
+            options = $optHt
+            rules = $cleanRules
             logs = @()
             resultData = $null
         }
@@ -384,6 +439,7 @@ function Get-OperationSnapshot ([string]$OperationId) {
 
         # Produce a deep clone hashtable containing only serializable primitive objects
         $snapshot = @{
+            id              = "$($src.operationId)"
             operationId     = "$($src.operationId)"
             type            = "$($src.type)"
             status          = "$($src.status)"
@@ -477,11 +533,13 @@ function Calculate-WeightedProgress {
 function Save-OperationHistory {
     param(
         [Parameter(Mandatory=$true)][hashtable]$OperationSummary,
-        [string]$HistoryFilePath = ""
+        [string]$HistoryFilePath = "",
+        [string]$RepoRoot = ""
     )
 
     if ([string]::IsNullOrWhiteSpace($HistoryFilePath)) {
-        $HistoryFilePath = Join-Path (Get-Location) "logs\history.json"
+        $base = if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot } else { (Get-Location).Path }
+        $HistoryFilePath = Join-Path $base "logs\history.json"
     }
 
     $histDir = Split-Path -Parent $HistoryFilePath
@@ -512,25 +570,33 @@ function Save-OperationHistory {
             }
         }
 
-        # Add or update summary
-        $cleanSummary = Protect-SensitiveData $OperationSummary
-        $newHistory = @($cleanSummary)
-        foreach ($item in $existing) {
-            if ($item.operationId -ne $cleanSummary.operationId) {
-                $newHistory += $item
+        # Mask sensitive credentials before persisting
+        $safeSummary = Protect-SensitiveData $OperationSummary
+
+        # Append or replace if exists
+        $opId = $safeSummary.operationId
+        if ([string]::IsNullOrWhiteSpace($opId)) { $opId = $safeSummary.id }
+        $foundIdx = -1
+        for ($i = 0; $i -lt $existing.Count; $i++) {
+            $item = $existing[$i]
+            $itemOpId = if ($item.operationId) { $item.operationId } else { $item.id }
+            if ($itemOpId -eq $opId) {
+                $foundIdx = $i
+                break
             }
         }
 
-        # Retain last 500 operations
-        if ($newHistory.Count -gt 500) {
-            $newHistory = @($newHistory[0..499])
+        if ($foundIdx -ge 0) {
+            $existing[$foundIdx] = $safeSummary
+        } else {
+            $existing += $safeSummary
         }
 
-        # Atomic write: history.tmp -> validate JSON -> atomic replace/rename
-        $tmpFile = Join-Path $histDir "history.tmp"
-        $json = ConvertTo-Json -InputObject @($newHistory) -Depth 6
-        if (-not $json.TrimStart().StartsWith("[")) {
-            $json = "[$json]"
+        # Atomic commit via .tmp
+        $tmpFile = "$HistoryFilePath.tmp"
+        $json = $existing | ConvertTo-Json -Depth 10
+        if ($null -eq $json) {
+            $json = "[]"
         }
         [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
 
@@ -553,9 +619,15 @@ function Save-OperationHistory {
     }
 }
 
-function Get-OperationHistory ([string]$HistoryFilePath = "") {
+function Get-OperationHistory {
+    param(
+        [string]$HistoryFilePath = "",
+        [string]$RepoRoot = ""
+    )
+
     if ([string]::IsNullOrWhiteSpace($HistoryFilePath)) {
-        $HistoryFilePath = Join-Path (Get-Location) "logs\history.json"
+        $base = if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot } else { (Get-Location).Path }
+        $HistoryFilePath = Join-Path $base "logs\history.json"
     }
 
     if (-not (Test-Path $HistoryFilePath)) { return ,@() }
@@ -565,18 +637,71 @@ function Get-OperationHistory ([string]$HistoryFilePath = "") {
         $rawText = [System.IO.File]::ReadAllText($HistoryFilePath, [System.Text.Encoding]::UTF8)
         if ([string]::IsNullOrWhiteSpace($rawText)) { return ,@() }
         $parsed = $rawText | ConvertFrom-Json
-        if ($null -eq $parsed) { return ,@() }
         return ,@($parsed)
     } catch {
-        # Corrupted history recovery
-        $histDir = Split-Path -Parent $HistoryFilePath
+        $hDir = Split-Path -Parent $HistoryFilePath
         $ts = (Get-Date).ToString("yyyyMMdd_HHmmss")
-        $corruptFile = Join-Path $histDir "history.corrupt.$ts.json"
+        $corruptFile = Join-Path $hDir "history.corrupt.$ts.json"
         try { Move-Item -LiteralPath $HistoryFilePath -Destination $corruptFile -Force } catch { }
         return ,@()
     } finally {
         [System.Threading.Monitor]::Exit($global:HistoryFileLock)
     }
+}
+
+function Recover-StaleOperations {
+    param(
+        [string]$RepoRoot = "",
+        [string]$HistoryFilePath = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HistoryFilePath)) {
+        $base = if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot } else { (Get-Location).Path }
+        $HistoryFilePath = Join-Path $base "logs\history.json"
+    }
+
+    if (-not (Test-Path -LiteralPath $HistoryFilePath)) { return 0 }
+
+    $recovered = 0
+    [System.Threading.Monitor]::Enter($global:HistoryFileLock)
+    try {
+        $rawText = [System.IO.File]::ReadAllText($HistoryFilePath, [System.Text.Encoding]::UTF8)
+        if ([string]::IsNullOrWhiteSpace($rawText)) { return 0 }
+        $list = $rawText | ConvertFrom-Json
+        $updatedList = @()
+        $nowIso = (Get-Date).ToUniversalTime().ToString("o")
+
+        foreach ($item in @($list)) {
+            $ht = @{}
+            foreach ($prop in $item.PSObject.Properties) {
+                $ht[$prop.Name] = $prop.Value
+            }
+
+            $nonTerminal = @("RUNNING", "COMMITTING", "ROLLING_BACK", "CANCELLATION_REQUESTED", "QUEUED")
+            if ($nonTerminal -contains $ht.status) {
+                $ht.status = "STALE_INTERRUPTED"
+                $ht.finishedAt = $nowIso
+                $ht.currentStage = "Interrupted by Server Restart"
+                $errs = if ($ht.errors) { @($ht.errors) } else { @() }
+                $errs += "Sunucu beklenmedik şekilde kapandığı için işlem kesintiye uğradı (STALE_INTERRUPTED)."
+                $ht.errors = $errs
+                $recovered++
+            }
+            $updatedList += $ht
+        }
+
+        if ($recovered -gt 0) {
+            $tmpFile = "$HistoryFilePath.tmp"
+            $json = $updatedList | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+            Move-Item -LiteralPath $tmpFile -Destination $HistoryFilePath -Force
+        }
+    } catch { }
+    finally {
+        [System.Threading.Monitor]::Exit($global:HistoryFileLock)
+    }
+
+    return $recovered
 }
 
 # ------------------------------------------------------------------------------
@@ -758,11 +883,23 @@ function Start-AsyncOperationWorker {
         Set-OperationStatus $opId "RUNNING" "Initializing" | Out-Null
         Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_STARTED" -Message "Worker started in STA runspace"
 
-        $op = Get-OperationSnapshot $opId
-        $type = $op.type
-        $dir = $op.directory
-        $rules = $op.rules
-        $options = $op.options
+        $type = ""
+        $dir = ""
+        $rules = @()
+        $options = @{}
+
+        [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+        try {
+            if ($global:OperationsRegistry.ContainsKey($opId)) {
+                $rawOp = $global:OperationsRegistry[$opId]
+                $type = "$($rawOp.type)"
+                $dir = "$($rawOp.directory)"
+                $rules = @($rawOp.rules)
+                $options = if ($rawOp.options) { @($rawOp.options)[0] } else { @{} }
+            }
+        } finally {
+            [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+        }
 
         $result = $null
         try {
@@ -855,6 +992,7 @@ function Start-AsyncOperationWorker {
         } catch { }
     }
 
-    $null = $ps.BeginInvoke($null, $null, $callback, $asyncState)
+    $inputCol = [System.Management.Automation.PSDataCollection[psobject]]::new()
+    $null = $ps.BeginInvoke($inputCol, $null, $callback, $asyncState)
     return $true
 }
