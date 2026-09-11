@@ -81,10 +81,21 @@ while ($listener.IsListening) {
 
         $path = $request.Url.AbsolutePath
 
-        # CORS Headers
-        $response.AddHeader("Access-Control-Allow-Origin", "*")
-        $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        $response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
+        # Enforce local requests only
+        if (-not $request.IsLocal) {
+            $response.StatusCode = 403
+            $response.OutputStream.Close()
+            continue
+        }
+
+        # Restrict CORS to local origins only (eliminate wildcard *)
+        $origin = $request.Headers["Origin"]
+        $allowedOrigins = @("http://localhost:$Port", "http://127.0.0.1:$Port")
+        if ($origin -and ($allowedOrigins -contains $origin)) {
+            $response.AddHeader("Access-Control-Allow-Origin", $origin)
+            $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            $response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
+        }
 
         if ($request.HttpMethod -eq "OPTIONS") {
             $response.StatusCode = 200
