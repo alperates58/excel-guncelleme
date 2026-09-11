@@ -8,7 +8,7 @@ if (Test-Path $engineScript) {
     . $engineScript
 }
 
-$workDir = Join-Path $repoRoot "tests\work"
+$workDir = Join-Path $env:TEMP "excel_updater_test_work"
 if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force | Out-Null }
 $fixtureDir = Join-Path $repoRoot "tests\fixtures"
 
@@ -144,15 +144,21 @@ if (Get-Command "New-StagingFile" -ErrorAction SilentlyContinue -and (Get-Comman
 # ------------------------------------------------------------------------------
 Write-Host "`n-- [TEST 9] test_locked_file --" -ForegroundColor Magenta
 if (Get-Command "Test-FileWritable" -ErrorAction SilentlyContinue) {
-    $lockFile = Join-Path $workDir "locked_test.txt"
-    "Lock test content" | Set-Content $lockFile -Encoding UTF8
+    $lockFile = Join-Path $workDir ("locked_test_" + [Guid]::NewGuid().ToString("N") + ".txt")
+    [System.IO.File]::WriteAllText($lockFile, "Lock test content", [System.Text.Encoding]::UTF8)
     
-    $stream = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-    $isWritable = Test-FileWritable $lockFile
-    $stream.Close()
-    $stream.Dispose()
-    
-    Assert-False $isWritable "test_locked_file correctly detected as non-writable"
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $isWritable = Test-FileWritable $lockFile
+        Assert-False $isWritable "test_locked_file correctly detected as non-writable"
+    } finally {
+        if ($stream) {
+            $stream.Close()
+            $stream.Dispose()
+        }
+        if (Test-Path $lockFile) { Remove-Item $lockFile -Force }
+    }
 } else {
     Write-Host "  [SKIP] Test-FileWritable not yet implemented" -ForegroundColor Yellow
 }

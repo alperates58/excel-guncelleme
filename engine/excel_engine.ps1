@@ -23,6 +23,71 @@ function Set-ProgressState ($active, $type, $current, $total, $currentFile) {
     }
 }
 
+function New-OperationId () {
+    return (Get-Date).ToString("yyyyMMdd_HHmmss") + "_" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+}
+
+function Get-FileSha256 ([string]$FilePath) {
+    if (-not (Test-Path $FilePath)) { return $null }
+    $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes = $sha.ComputeHash($stream)
+        return [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToUpper()
+    } finally {
+        $stream.Close()
+        $stream.Dispose()
+        if ($sha) { $sha.Dispose() }
+    }
+}
+
+function Test-FileWritable ([string]$FilePath) {
+    if (-not (Test-Path $FilePath)) { return $false }
+    try {
+        $stream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $stream.Close()
+        $stream.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-ReplacementRulesValid ($Rules) {
+    if ($null -eq $Rules -or $Rules.Count -eq 0) {
+        return @{ IsValid = $false; Error = "Hiçbir değişim kuralı belirtilmedi." ; ValidRules = @() }
+    }
+
+    $seenOld = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $validRules = @()
+
+    foreach ($r in $Rules) {
+        $oldText = if ($r.oldText) { $r.oldText.Trim() } else { "" }
+        $newText = if ($r.newText) { $r.newText.Trim() } else { "" }
+
+        if ([string]::IsNullOrWhiteSpace($oldText) -or [string]::IsNullOrWhiteSpace($newText)) {
+            continue
+        }
+
+        if ($oldText -eq $newText) {
+            return @{ IsValid = $false; Error = "Eski ve yeni metin aynı olamaz: '$oldText'"; ValidRules = @() }
+        }
+
+        if ($seenOld.Contains($oldText)) {
+            return @{ IsValid = $false; Error = "Aynı arama metni için birden fazla kural tanımlanamaz (Çift kural): '$oldText'"; ValidRules = @() }
+        }
+
+        $seenOld.Add($oldText) | Out-Null
+        $validRules += @{ oldText = $oldText; newText = $newText }
+    }
+
+    if ($validRules.Count -eq 0) {
+        return @{ IsValid = $false; Error = "Geçerli bir arama/değiştirme kuralı bulunamadı."; ValidRules = @() }
+    }
+
+    return @{ IsValid = $true; Error = ""; ValidRules = $validRules }
+}
+
 function Cleanup-ExcelCOM ($excel) {
     if ($excel) {
         try { $excel.Quit() } catch { }
@@ -40,16 +105,27 @@ function Get-ExcelFiles ($DirectoryPath) {
         Where-Object { 
             ($_.Extension -eq ".xlsx" -or $_.Extension -eq ".xlsm" -or $_.Extension -eq ".xlsb") -and
             -not $_.Name.StartsWith("~$") -and 
-            -not $_.Name.StartsWith("backup_") 
+            -not $_.Name.StartsWith("backup_") -and
+            -not $_.Name.Contains(".staging.") -and
+            -not $_.Name.EndsWith(".old") -and
+            -not $_.DirectoryName.Contains("_ExcelUpdater_Backups")
         }
 }
 
 function Copy-FileWithShare ($srcPath, $dstPath) {
     $srcStream = New-Object System.IO.FileStream($srcPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    $dstStream = New-Object System.IO.FileStream($dstPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    $srcStream.CopyTo($dstStream)
-    $dstStream.Close()
-    $srcStream.Close()
+    try {
+        $dstStream = New-Object System.IO.FileStream($dstPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $srcStream.CopyTo($dstStream)
+        } finally {
+            $dstStream.Close()
+            $dstStream.Dispose()
+        }
+    } finally {
+        $srcStream.Close()
+        $srcStream.Dispose()
+    }
 }
 
 function Scan-ExcelDirectory ($DirectoryPath) {
