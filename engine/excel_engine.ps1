@@ -172,10 +172,10 @@ function Cleanup-ExcelCOM ($excel) {
 }
 
 function Get-ExcelFiles ($DirectoryPath) {
-    if (-not (Test-Path $DirectoryPath)) {
+    if (-not (Test-Path -LiteralPath $DirectoryPath)) {
         return @()
     }
-    return Get-ChildItem -Path $DirectoryPath -File | 
+    $raw = Get-ChildItem -LiteralPath $DirectoryPath -File -ErrorAction SilentlyContinue | 
         Where-Object { 
             ($_.Extension -eq ".xlsx" -or $_.Extension -eq ".xlsm" -or $_.Extension -eq ".xlsb") -and
             -not $_.Name.StartsWith("~$") -and 
@@ -184,6 +184,10 @@ function Get-ExcelFiles ($DirectoryPath) {
             -not $_.Name.EndsWith(".old") -and
             -not $_.DirectoryName.Contains("_ExcelUpdater_Backups")
         }
+    if ($raw) {
+        return @($raw)
+    }
+    return @()
 }
 
 function Copy-FileWithShare ($srcPath, $dstPath) {
@@ -202,16 +206,22 @@ function Copy-FileWithShare ($srcPath, $dstPath) {
     }
 }
 
-function Scan-ExcelDirectory ($DirectoryPath) {
+function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
     $files = Get-ExcelFiles $DirectoryPath
     $fileList = @()
     $ipSummary = @{}
     $totalCount = $files.Count
 
     Set-ProgressState $true "scan" 0 $totalCount "Taramaya Başlanıyor..."
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Taramaya Başlanıyor..." -CurrentStage "Scanning" -ProgressPercent 0
+    }
 
     if ($totalCount -eq 0) {
         Set-ProgressState $false "scan" 0 0 ""
+        if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+            $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles 0 -CurrentFile "Dosya Bulunamadı" -CurrentStage "Completed" -ProgressPercent 100
+        }
         return @{
             success = $true
             message = "No Excel files found in directory."
@@ -228,6 +238,11 @@ function Scan-ExcelDirectory ($DirectoryPath) {
         $excel.Visible = $false
         $excel.DisplayAlerts = $false
         $excel.ScreenUpdating = $false
+        $excel.EnableEvents = $false
+        $excel.AskToUpdateLinks = $false
+        try {
+            $excel.AutomationSecurity = 3 # msoAutomationSecurityForceDisable
+        } catch { }
     } catch {
         Set-ProgressState $false "scan" 0 0 ""
         return @{
@@ -240,8 +255,20 @@ function Scan-ExcelDirectory ($DirectoryPath) {
     $processedCount = 0
 
     foreach ($file in $files) {
+        # Cooperative cancellation checkpoint
+        if ($OperationId -and (Get-Command "Test-OperationCancellationRequested" -ErrorAction SilentlyContinue) -and (Test-OperationCancellationRequested $OperationId)) {
+            if (Get-Command "Set-OperationStatus" -ErrorAction SilentlyContinue) {
+                $null = Set-OperationStatus $OperationId "CANCELLED" "Tarama kullanıcı tarafından iptal edildi"
+            }
+            break
+        }
+
         $processedCount++
+        $pct = if ($totalCount -gt 0) { [math]::Min(99, [math]::Max(1, [math]::Round((($processedCount - 1) / $totalCount) * 100))) } else { 0 }
         Set-ProgressState $true "scan" $processedCount $totalCount $file.Name
+        if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+            $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile $file.Name -CurrentStage "Scanning" -ProgressPercent $pct
+        }
 
         $fileDetail = @{
             filePath = $file.FullName
@@ -257,7 +284,7 @@ function Scan-ExcelDirectory ($DirectoryPath) {
         }
 
         try {
-            $wb = $excel.Workbooks.Open($file.FullName, 0, $true) # Read-only open
+            $wb = $excel.Workbooks.Open($file.FullName, 0, $true, [Type]::Missing, [Type]::Missing, [Type]::Missing, $true) # Read-only open, IgnoreReadOnlyRecommended
 
             # 1. Check Power Queries
             try {
@@ -373,10 +400,17 @@ function Scan-ExcelDirectory ($DirectoryPath) {
         }
 
         $fileList += $fileDetail
+        if ($OperationId -and (Get-Command "Append-OperationScannedFile" -ErrorAction SilentlyContinue)) {
+            Append-OperationScannedFile -OperationId $OperationId -FileDetail $fileDetail -IpSummary $ipSummary
+        }
     }
 
     Cleanup-ExcelCOM $excel
     Set-ProgressState $false "scan" $totalCount $totalCount "Tarama Tamamlandı!"
+
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile "Tamamlandı" -CurrentStage "Completed" -ProgressPercent 100
+    }
 
     $detectedIPsList = @()
     foreach ($k in $ipSummary.Keys) {

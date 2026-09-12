@@ -14,6 +14,20 @@ let currentBrowserDir = '';
 let parentBrowserDir = '';
 let selectedRestoreBackup = null;
 
+function ensureArray(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) {
+        if (val.length === 1 && Array.isArray(val[0])) return val[0];
+        return val;
+    }
+    if (typeof val === 'object') {
+        const keys = Object.keys(val);
+        if (keys.length === 0) return [];
+        return [val];
+    }
+    return [];
+}
+
 // DOM Elements - Navigation & Status
 const serverStatus = document.getElementById('serverStatus');
 const navTabs = document.querySelectorAll('.nav-tab');
@@ -69,9 +83,19 @@ const btnModalClose = document.getElementById('btnModalClose');
 
 const folderBrowserModal = document.getElementById('folderBrowserModal');
 const btnFolderModalClose = document.getElementById('btnFolderModalClose');
-const modalFolderPathInput = document.getElementById('modalFolderPathInput');
-const subfoldersList = document.getElementById('subfoldersList');
+const btnCancelFolderModal = document.getElementById('btnCancelFolderModal');
+const btnPathBack = document.getElementById('btnPathBack');
 const btnPathUp = document.getElementById('btnPathUp');
+const btnPathRefresh = document.getElementById('btnPathRefresh');
+const breadcrumbsList = document.getElementById('breadcrumbsList');
+const modalFolderPathInput = document.getElementById('modalFolderPathInput');
+const btnTogglePathInput = document.getElementById('btnTogglePathInput');
+const folderFilterInput = document.getElementById('folderFilterInput');
+const sidebarDrivesList = document.getElementById('sidebarDrivesList');
+const btnQuickNetworkUNC = document.getElementById('btnQuickNetworkUNC');
+const folderCountLabel = document.getElementById('folderCountLabel');
+const selectedPathDisplay = document.getElementById('selectedPathDisplay');
+const subfoldersList = document.getElementById('subfoldersList');
 const btnSelectCurrentFolder = document.getElementById('btnSelectCurrentFolder');
 
 // Confirmation Modal
@@ -117,8 +141,6 @@ const diagQueueBody = document.getElementById('diagQueueBody');
 const btnShortcutDesktop = document.getElementById('btnShortcutDesktop');
 const btnShortcutDownloads = document.getElementById('btnShortcutDownloads');
 const btnShortcutProject = document.getElementById('btnShortcutProject');
-const btnShortcutC = document.getElementById('btnShortcutC');
-const btnShortcutD = document.getElementById('btnShortcutD');
 
 // Initialize App
 document.addEventListener('DOMContentLoaded', () => {
@@ -133,17 +155,66 @@ function bindEvents() {
         tab.addEventListener('click', () => switchTab(tab.dataset.tab));
     });
 
-    // Folder Browser
+    // Modern Folder Explorer Controls
     btnBrowse.addEventListener('click', openFolderBrowserModal);
-    btnFolderModalClose.addEventListener('click', () => { folderBrowserModal.style.display = 'none'; });
-    btnPathUp.addEventListener('click', () => { if (parentBrowserDir) loadFolderTree(parentBrowserDir); });
-    btnSelectCurrentFolder.addEventListener('click', selectFolderFromModal);
+    if (btnFolderModalClose) btnFolderModalClose.addEventListener('click', () => { folderBrowserModal.style.display = 'none'; });
+    if (btnCancelFolderModal) btnCancelFolderModal.addEventListener('click', () => { folderBrowserModal.style.display = 'none'; });
+    if (btnPathBack) btnPathBack.addEventListener('click', () => {
+        if (folderHistory.length > 0) {
+            const prev = folderHistory.pop();
+            loadFolderTree(prev, false);
+        }
+    });
+    if (btnPathUp) btnPathUp.addEventListener('click', () => { if (parentBrowserDir) loadFolderTree(parentBrowserDir); });
+    if (btnPathRefresh) btnPathRefresh.addEventListener('click', () => { if (currentBrowserDir) loadFolderTree(currentBrowserDir, false); });
+    if (btnSelectCurrentFolder) btnSelectCurrentFolder.addEventListener('click', selectFolderFromModal);
 
-    btnShortcutDesktop.addEventListener('click', () => { if (userDesktop) loadFolderTree(userDesktop); });
-    btnShortcutDownloads.addEventListener('click', () => { if (userDownloads) loadFolderTree(userDownloads); });
-    btnShortcutProject.addEventListener('click', () => { if (serverWorkspace) loadFolderTree(serverWorkspace); });
-    btnShortcutC.addEventListener('click', () => loadFolderTree('C:\\'));
-    btnShortcutD.addEventListener('click', () => loadFolderTree('D:\\'));
+    if (btnTogglePathInput) {
+        btnTogglePathInput.addEventListener('click', () => {
+            const isDirectHidden = modalFolderPathInput.classList.contains('hidden');
+            if (isDirectHidden) {
+                modalFolderPathInput.classList.remove('hidden');
+                breadcrumbsList.classList.add('hidden');
+                modalFolderPathInput.focus();
+                modalFolderPathInput.select();
+            } else {
+                modalFolderPathInput.classList.add('hidden');
+                breadcrumbsList.classList.remove('hidden');
+            }
+        });
+    }
+
+    if (modalFolderPathInput) {
+        modalFolderPathInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const p = modalFolderPathInput.value.trim();
+                if (p) loadFolderTree(p);
+                modalFolderPathInput.classList.add('hidden');
+                breadcrumbsList.classList.remove('hidden');
+            }
+        });
+    }
+
+    if (folderFilterInput) {
+        folderFilterInput.addEventListener('input', () => {
+            renderSubfoldersList(cachedSubFolders);
+        });
+    }
+
+    if (btnShortcutDesktop) btnShortcutDesktop.addEventListener('click', () => { if (userDesktop) loadFolderTree(userDesktop); });
+    if (btnShortcutDownloads) btnShortcutDownloads.addEventListener('click', () => { if (userDownloads) loadFolderTree(userDownloads); });
+    if (btnShortcutProject) btnShortcutProject.addEventListener('click', () => { if (serverWorkspace) loadFolderTree(serverWorkspace); });
+
+    if (btnQuickNetworkUNC) {
+        btnQuickNetworkUNC.addEventListener('click', () => {
+            modalFolderPathInput.classList.remove('hidden');
+            breadcrumbsList.classList.add('hidden');
+            modalFolderPathInput.value = '\\\\';
+            modalFolderPathInput.focus();
+            modalFolderPathInput.setSelectionRange(2, 2);
+        });
+    }
 
     // Operations
     btnScan.addEventListener('click', runScan);
@@ -185,6 +256,36 @@ function bindEvents() {
         if (e.target === restoreConfirmModal) restoreConfirmModal.style.display = 'none';
         if (e.target === historyDetailModal) historyDetailModal.style.display = 'none';
     });
+
+    // Guard page reload / navigation while an operation is in progress
+    window.addEventListener('beforeunload', (e) => {
+        if (isOperationInProgress()) {
+            e.preventDefault();
+            e.returnValue = 'Şu anda devam eden bir işlem (Tarama / Güncelleme) var. Sayfadan ayrılırsanız işlem bağlantısı kesilebilir. Ayrılmak istediğinizden emin misiniz?';
+            return e.returnValue;
+        }
+    });
+
+    // Intercept F5 and Ctrl+R refresh shortcuts during active operations
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R'))) {
+            if (isOperationInProgress()) {
+                e.preventDefault();
+                const confirmed = window.confirm(
+                    'UYARI: Şu anda arka planda devam eden bir işlem var (Tarama / Güncelleme)!\n\n' +
+                    'Sayfayı yenilerseniz canlı işlem takibi kesintiye uğrayabilir.\n\n' +
+                    'Yine de sayfayı yenilemek istiyor musunuz?'
+                );
+                if (confirmed) {
+                    window.location.reload();
+                }
+            }
+        }
+    });
+}
+
+function isOperationInProgress() {
+    return !!(activeOpPollingInterval || isScanning);
 }
 
 function appendLog(message, type = 'info') {
@@ -307,7 +408,9 @@ function handleOperationFinished(op) {
         if (op.type === 'PREVIEW') {
             appendLog(`ÖNİZLEME (DRY RUN) TAMAMLANDI! Dosyalarda değişiklik yapılmadı.`, 'success');
             appendLog(`İncelenen Dosya: ${resData.totalFilesScanned || op.processedFiles} | Değişecek Dosya: ${resData.prospectiveUpdatedFilesCount || 0} | Potansiyel Değişiklik: ${resData.totalProspectiveReplacements || 0}`, 'info');
-            tableTitle.innerHTML = `<i class="fa-solid fa-eye text-primary"></i> Önizleme (Dry Run) Sonuçları <span class="badge badge-warning">Değişiklik Yapılmadı</span>`;
+            if (tableTitle) {
+                tableTitle.innerHTML = `<i class="fa-solid fa-eye text-primary"></i> Önizleme (Dry Run) Sonuçları <span class="badge badge-warning">Değişiklik Yapılmadı</span>`;
+            }
             if (resData.files) {
                 currentScanData = { files: resData.files, totalFiles: resData.files.length };
                 renderTable(resData.files);
@@ -520,8 +623,18 @@ async function executeConfirmedUpdate() {
 }
 
 // ------------------------------------------------------------------------------
-// SCAN FILES
+// SCAN FILES (ASYNCHRONOUS LIVE PROGRESSIVE STREAMING)
 // ------------------------------------------------------------------------------
+let isScanning = false;
+let scanRenderedFileCount = 0;
+
+function resetScanUI() {
+    isScanning = false;
+    btnScan.disabled = false;
+    btnScan.innerHTML = `<i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara`;
+    if (btnCancelOperation) btnCancelOperation.style.display = 'none';
+}
+
 async function runScan() {
     const dir = folderPathInput.value.trim();
     if (!dir) {
@@ -530,32 +643,258 @@ async function runScan() {
     }
 
     btnScan.disabled = true;
-    btnScan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Taranıyor...`;
+    btnScan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Başlatılıyor...`;
+    
+    // Reset table, counters and logs
+    filesTable.innerHTML = '';
+    badgeFileCount.textContent = '0 Dosya Taranıyor...';
+    if (tableTitle) {
+        tableTitle.innerHTML = `<i class="fa-solid fa-table-list"></i> Canlı Tarama Sonuçları`;
+    }
+
+    statTotalFiles.textContent = '0';
+    statPowerQueries.textContent = '0';
+    statConnections.textContent = '0';
+    statVbaModules.textContent = '0';
+    quickChips.innerHTML = `<span class="chip-placeholder"><i class="fa-solid fa-spinner fa-spin"></i> IP adresleri taranıyor...</span>`;
+
+    // Activate Progress Bar Section
+    progressSection.classList.remove('hidden');
+    progressDot.className = 'status-dot pulsing';
+    progressStatusText.innerHTML = `<i class="fa-solid fa-magnifying-glass fa-spin text-primary"></i> Dosyalar taranıyor: <code>${escapeHtml(dir)}</code>...`;
+    progressStageBadge.textContent = 'Tarama';
+    progressStageBadge.className = 'badge badge-info ml-2';
+    progressPercent.textContent = '0%';
+    progressBar.style.width = '0%';
+    
+    btnCancelOperation.disabled = false;
+    btnCancelOperation.style.display = 'inline-block';
+    btnCancelOperation.innerHTML = `<i class="fa-solid fa-ban"></i> İptal Et`;
+
     appendLog(`Excel dosyaları taranıyor: "${dir}"...`, 'info');
-    tableTitle.innerHTML = `<i class="fa-solid fa-table-list"></i> Tarama Sonuçları`;
+    scanRenderedFileCount = 0;
+    isScanning = true;
 
     try {
         const res = await fetch(`${API_BASE}/scan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ directory: dir })
+            body: JSON.stringify({ directory: dir, async: true })
         });
-        const data = await res.json();
 
-        if (data.success) {
-            currentScanData = data;
-            renderScanResults(data);
-            appendLog(`Tarama tamamlandı! Toplam ${data.totalFiles} dosya incelendi.`, 'success');
-        } else {
-            appendLog(`Tarama hatası: ${data.error}`, 'error');
-            alert(`Tarama hatası: ${data.error}`);
+        if (res.status === 409) {
+            const conflict = await res.json();
+            alert(`Şu anda devam eden bir işlem var (${conflict.activeType || 'İşlem'}). Lütfen bitmesini bekleyin.`);
+            resetScanUI();
+            return;
         }
+
+        const data = await res.json();
+        if (!data.success && !data.operationId) {
+            appendLog(`Tarama başlatılamadı: ${data.error}`, 'error');
+            alert(`Tarama başlatılamadı: ${data.error}`);
+            resetScanUI();
+            return;
+        }
+
+        activeOperationId = data.operationId;
+        btnScan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Taranıyor...`;
+
+        pollScanProgress(activeOperationId, dir);
+
     } catch (err) {
         appendLog(`Bağlantı hatası: ${err.message}`, 'error');
-    } finally {
-        btnScan.disabled = false;
-        btnScan.innerHTML = `<i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara`;
+        resetScanUI();
     }
+}
+
+function pollScanProgress(opId, dir) {
+    if (activeOpPollingInterval) clearInterval(activeOpPollingInterval);
+
+    let cumulativeQueries = 0;
+    let cumulativeConnections = 0;
+    let cumulativeVba = 0;
+
+    activeOpPollingInterval = setInterval(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/operations/${opId}`);
+            const data = await res.json();
+            const snap = (data && data.operation) ? data.operation : data;
+            if (!snap) return;
+
+            // 1. Update Progress Bar & Percentage
+            const pct = Math.min(100, Math.max(0, snap.progressPercent || 0));
+            progressBar.style.width = `${pct}%`;
+            const totalText = (snap.totalFiles !== undefined && snap.totalFiles !== null) ? snap.totalFiles : '?';
+            progressPercent.textContent = `${pct}% (${snap.processedFiles || 0} / ${totalText})`;
+
+            // 2. Live Current File Display
+            if (snap.currentFile) {
+                progressStatusText.innerHTML = `<i class="fa-solid fa-magnifying-glass fa-spin text-primary"></i> <strong>Taranıyor:</strong> ${escapeHtml(snap.currentFile)}`;
+            }
+
+            // 3. Dynamic Row-by-Row Table Population
+            const scannedFiles = ensureArray(snap.scannedFiles);
+            if (scannedFiles.length > scanRenderedFileCount) {
+                const newFiles = scannedFiles.slice(scanRenderedFileCount);
+                newFiles.forEach(fileItem => {
+                    if (!fileItem) return;
+                    const row = createTableRow(fileItem, scanRenderedFileCount, true);
+                    filesTable.appendChild(row);
+                    scanRenderedFileCount++;
+
+                    const q = ensureArray(fileItem.queries);
+                    const c = ensureArray(fileItem.connections);
+                    const v = ensureArray(fileItem.vbaMatches);
+                    cumulativeQueries += q.length;
+                    cumulativeConnections += c.length;
+                    cumulativeVba += v.length;
+                });
+
+                statTotalFiles.textContent = scanRenderedFileCount;
+                statPowerQueries.textContent = cumulativeQueries;
+                statConnections.textContent = cumulativeConnections;
+                statVbaModules.textContent = cumulativeVba;
+                badgeFileCount.textContent = `${scanRenderedFileCount} / ${totalText} Dosya Taranıyor...`;
+            }
+
+            // 4. Live Discovered IP Chips
+            const detectedIPs = ensureArray(snap.detectedIPs);
+            if (detectedIPs.length > 0) {
+                quickChips.innerHTML = '';
+                detectedIPs.forEach(item => {
+                    if (item && item.ip) {
+                        const chip = document.createElement('span');
+                        chip.className = 'chip';
+                        chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${escapeHtml(item.ip)} (${item.count || 1})`;
+                        chip.addEventListener('click', () => setRuleOldIP(item.ip));
+                        quickChips.appendChild(chip);
+                    }
+                });
+            }
+
+            // 5. Terminal State Checks
+            if (snap.status === 'COMPLETED') {
+                clearInterval(activeOpPollingInterval);
+                activeOpPollingInterval = null;
+                isScanning = false;
+
+                progressBar.style.width = '100%';
+                progressPercent.textContent = '100%';
+                progressDot.className = 'status-dot online';
+                progressStageBadge.className = 'badge badge-success ml-2';
+                progressStageBadge.textContent = 'Tamamlandı';
+                progressStatusText.innerHTML = `<i class="fa-solid fa-check text-success"></i> Tarama Başarıyla Tamamlandı! Toplam ${scanRenderedFileCount} dosya incelendi.`;
+                badgeFileCount.textContent = `${scanRenderedFileCount} Dosya Listelendi`;
+
+                currentScanData = {
+                    success: true,
+                    directory: dir,
+                    totalFiles: scanRenderedFileCount,
+                    files: snap.scannedFiles || [],
+                    detectedIPs: snap.detectedIPs || []
+                };
+
+                if (currentScanData.files.length === 0) {
+                    filesTable.innerHTML = `
+                        <tr class="empty-row">
+                            <td colspan="8">
+                                <div class="empty-state">
+                                    <i class="fa-solid fa-folder-open empty-icon"></i>
+                                    <p>Belirtilen klasörde Excel dosyası (.xlsx, .xlsm, .xlsb) bulunamadı.</p>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                    badgeFileCount.textContent = '0 Dosya';
+                }
+
+                btnScan.disabled = false;
+                btnScan.innerHTML = `<i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara`;
+                btnCancelOperation.style.display = 'none';
+                appendLog(`Tarama tamamlandı! Toplam ${scanRenderedFileCount} dosya incelendi.`, 'success');
+
+            } else if (snap.status === 'CANCELLED') {
+                clearInterval(activeOpPollingInterval);
+                activeOpPollingInterval = null;
+                isScanning = false;
+
+                progressDot.className = 'status-dot warning';
+                progressStageBadge.className = 'badge badge-warning ml-2';
+                progressStageBadge.textContent = 'İptal Edildi';
+                progressStatusText.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-warning"></i> Tarama kullanıcı tarafından iptal edildi.`;
+                badgeFileCount.textContent = `${scanRenderedFileCount} Dosya (İptal Edildi)`;
+
+                currentScanData = {
+                    success: true,
+                    directory: dir,
+                    totalFiles: scanRenderedFileCount,
+                    files: snap.scannedFiles || [],
+                    detectedIPs: snap.detectedIPs || []
+                };
+
+                btnScan.disabled = false;
+                btnScan.innerHTML = `<i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara`;
+                btnCancelOperation.style.display = 'none';
+                appendLog(`Tarama durduruldu. O ana kadar taranan ${scanRenderedFileCount} dosya listelendi.`, 'warning');
+
+            } else if (snap.status === 'FAILED') {
+                clearInterval(activeOpPollingInterval);
+                activeOpPollingInterval = null;
+                isScanning = false;
+
+                progressDot.className = 'status-dot danger';
+                progressStageBadge.className = 'badge badge-danger ml-2';
+                progressStageBadge.textContent = 'Hata';
+                const errDetail = snap.errors && snap.errors.length > 0 ? snap.errors.join('; ') : 'Bilinmeyen hata';
+                progressStatusText.innerHTML = `<i class="fa-solid fa-circle-xmark text-danger"></i> Tarama Hatası: ${escapeHtml(errDetail)}`;
+
+                btnScan.disabled = false;
+                btnScan.innerHTML = `<i class="fa-solid fa-magnifying-glass-chart"></i> Klasörü Tara`;
+                btnCancelOperation.style.display = 'none';
+                appendLog(`Tarama hatası: ${errDetail}`, 'error');
+            }
+        } catch (err) {
+            console.error('Scan polling error:', err);
+        }
+    }, 400);
+}
+
+function createTableRow(f, idx, animate = false) {
+    const tr = document.createElement('tr');
+    if (animate) tr.className = 'row-appear';
+
+    const qCount = f.queries ? f.queries.length : 0;
+    const cCount = f.connections ? f.connections.length : 0;
+    const vCount = f.vbaMatches ? f.vbaMatches.length : 0;
+    const ipsStr = f.foundIPs && f.foundIPs.length > 0 ? f.foundIPs.join(', ') : '-';
+
+    let badgeClass = 'badge-info';
+    let statusLabel = f.status || 'Taranmış';
+    if (statusLabel.startsWith('Error')) badgeClass = 'badge-danger';
+    else if (statusLabel === 'Updated') badgeClass = 'badge-success';
+    else if (statusLabel === 'Would Update') {
+        badgeClass = 'badge-warning';
+        statusLabel = `Değişecek (${f.prospectiveReplacements || 0})`;
+    }
+
+    tr.innerHTML = `
+        <td><strong>${escapeHtml(f.fileName)}</strong></td>
+        <td><span class="badge ${f.extension === '.xlsm' ? 'badge-warning' : 'badge-info'}">${(f.extension || '').toUpperCase()}</span></td>
+        <td>${qCount > 0 ? `<span class="badge badge-info">${qCount} Sorgu</span>` : '<span class="text-dim">0</span>'}</td>
+        <td>${cCount > 0 ? `<span class="badge badge-warning">${cCount} Bağlantı</span>` : '<span class="text-dim">0</span>'}</td>
+        <td>${vCount > 0 ? `<span class="badge badge-success">${vCount} Makro</span>` : '<span class="text-dim">0</span>'}</td>
+        <td><code class="text-primary">${escapeHtml(ipsStr)}</code></td>
+        <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
+        <td>
+            <button class="btn btn-outline-sm btn-detail" data-index="${idx}">
+                <i class="fa-solid fa-eye"></i> İncele
+            </button>
+        </td>
+    `;
+
+    tr.querySelector('.btn-detail').addEventListener('click', () => showFileModal(f));
+    return tr;
 }
 
 function renderScanResults(data) {
@@ -564,7 +903,7 @@ function renderScanResults(data) {
         data.detectedIPs.forEach(item => {
             const chip = document.createElement('span');
             chip.className = 'chip';
-            chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${item.ip} (${item.count})`;
+            chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${escapeHtml(item.ip)} (${item.count})`;
             chip.addEventListener('click', () => {
                 setRuleOldIP(item.ip);
             });
@@ -580,11 +919,13 @@ function renderScanResults(data) {
     let totalConnections = 0;
     let totalVba = 0;
 
-    data.files.forEach(f => {
-        totalQueries += (f.queries ? f.queries.length : 0);
-        totalConnections += (f.connections ? f.connections.length : 0);
-        totalVba += (f.vbaMatches ? f.vbaMatches.length : 0);
-    });
+    if (data.files) {
+        data.files.forEach(f => {
+            totalQueries += (f.queries ? f.queries.length : 0);
+            totalConnections += (f.connections ? f.connections.length : 0);
+            totalVba += (f.vbaMatches ? f.vbaMatches.length : 0);
+        });
+    }
 
     statPowerQueries.textContent = totalQueries;
     statConnections.textContent = totalConnections;
@@ -602,7 +943,7 @@ function renderTable(files) {
                 <td colspan="8">
                     <div class="empty-state">
                         <i class="fa-solid fa-folder-open empty-icon"></i>
-                        <p>Belirtilen klasörde Excel dosyası (.xlsx, .xlsm) bulunamadı.</p>
+                        <p>Belirtilen klasörde Excel dosyası (.xlsx, .xlsm, .xlsb) bulunamadı.</p>
                     </div>
                 </td>
             </tr>
@@ -614,38 +955,7 @@ function renderTable(files) {
     badgeFileCount.textContent = `${files.length} Dosya Listelendi`;
 
     files.forEach((f, idx) => {
-        const tr = document.createElement('tr');
-        
-        const qCount = f.queries ? f.queries.length : 0;
-        const cCount = f.connections ? f.connections.length : 0;
-        const vCount = f.vbaMatches ? f.vbaMatches.length : 0;
-        const ipsStr = f.foundIPs && f.foundIPs.length > 0 ? f.foundIPs.join(', ') : '-';
-
-        let badgeClass = 'badge-info';
-        let statusLabel = f.status || 'Taranmış';
-        if (statusLabel.startsWith('Error')) badgeClass = 'badge-danger';
-        else if (statusLabel === 'Updated') badgeClass = 'badge-success';
-        else if (statusLabel === 'Would Update') {
-            badgeClass = 'badge-warning';
-            statusLabel = `Değişecek (${f.prospectiveReplacements || 0})`;
-        }
-
-        tr.innerHTML = `
-            <td><strong>${escapeHtml(f.fileName)}</strong></td>
-            <td><span class="badge ${f.extension === '.xlsm' ? 'badge-warning' : 'badge-info'}">${(f.extension || '').toUpperCase()}</span></td>
-            <td>${qCount > 0 ? `<span class="badge badge-info">${qCount} Sorgu</span>` : '<span class="text-dim">0</span>'}</td>
-            <td>${cCount > 0 ? `<span class="badge badge-warning">${cCount} Bağlantı</span>` : '<span class="text-dim">0</span>'}</td>
-            <td>${vCount > 0 ? `<span class="badge badge-success">${vCount} Makro</span>` : '<span class="text-dim">0</span>'}</td>
-            <td><code class="text-primary">${escapeHtml(ipsStr)}</code></td>
-            <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
-            <td>
-                <button class="btn btn-outline-sm btn-detail" data-index="${idx}">
-                    <i class="fa-solid fa-eye"></i> İncele
-                </button>
-            </td>
-        `;
-
-        tr.querySelector('.btn-detail').addEventListener('click', () => showFileModal(f));
+        const tr = createTableRow(f, idx, false);
         filesTable.appendChild(tr);
     });
 }
@@ -1068,16 +1378,30 @@ async function openFolder() {
 }
 
 // ------------------------------------------------------------------------------
-// INTERACTIVE FOLDER BROWSER
+// MODERN INTERACTIVE FOLDER EXPLORER
 // ------------------------------------------------------------------------------
+let folderHistory = [];
+let cachedSubFolders = [];
+let selectedSubfolderPath = '';
+
 function openFolderBrowserModal() {
     const currentPath = folderPathInput.value.trim() || serverWorkspace;
-    loadFolderTree(currentPath);
+    folderHistory = [];
+    if (folderFilterInput) folderFilterInput.value = '';
     folderBrowserModal.style.display = 'flex';
+    loadFolderTree(currentPath, false);
 }
 
-async function loadFolderTree(targetDir) {
+async function loadFolderTree(targetDir, pushHistory = true) {
+    if (!targetDir) return;
+
+    if (pushHistory && currentBrowserDir && currentBrowserDir !== targetDir) {
+        folderHistory.push(currentBrowserDir);
+    }
+    if (btnPathBack) btnPathBack.disabled = (folderHistory.length === 0);
+
     subfoldersList.innerHTML = `<div class="subfolder-card-placeholder"><i class="fa-solid fa-spinner fa-spin"></i> Klasörler yükleniyor...</div>`;
+    if (folderCountLabel) folderCountLabel.textContent = 'Yükleniyor...';
 
     try {
         const res = await fetch(`${API_BASE}/list-folders`, {
@@ -1090,43 +1414,157 @@ async function loadFolderTree(targetDir) {
         if (data.success) {
             currentBrowserDir = data.currentDir;
             parentBrowserDir = data.parentDir;
+            selectedSubfolderPath = data.currentDir;
+            
             modalFolderPathInput.value = data.currentDir;
+            if (selectedPathDisplay) selectedPathDisplay.textContent = data.currentDir;
+            if (btnPathUp) btnPathUp.disabled = !parentBrowserDir;
 
-            subfoldersList.innerHTML = '';
+            // Render interactive breadcrumb pills
+            renderBreadcrumbs(data.currentDir);
 
-            if (data.drives && data.drives.length > 0) {
-                data.drives.forEach(d => {
-                    const card = document.createElement('div');
-                    card.className = 'subfolder-card';
-                    card.innerHTML = `<i class="fa-solid fa-hard-drive"></i> ${escapeHtml(d.name)}`;
-                    card.addEventListener('click', () => loadFolderTree(d.path));
-                    subfoldersList.appendChild(card);
-                });
+            // Render system drives in left sidebar
+            const driveList = ensureArray(data.drives);
+            if (driveList.length > 0) {
+                renderSidebarDrives(driveList, data.currentDir);
             }
 
-            if (data.subFolders && data.subFolders.length > 0) {
-                data.subFolders.forEach(sub => {
-                    const card = document.createElement('div');
-                    card.className = 'subfolder-card';
-                    card.innerHTML = `<i class="fa-solid fa-folder"></i> ${escapeHtml(sub.name)}`;
-                    card.addEventListener('click', () => loadFolderTree(sub.path));
-                    subfoldersList.appendChild(card);
-                });
-            }
-
-            if ((!data.subFolders || data.subFolders.length === 0) && (!data.drives || data.drives.length === 0)) {
-                subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-dim">Alt klasör bulunamadı.</div>`;
+            cachedSubFolders = ensureArray(data.subFolders);
+            renderSubfoldersList(cachedSubFolders);
+            
+            if (folderCountLabel) {
+                folderCountLabel.textContent = `${cachedSubFolders.length} alt klasör bulundu`;
             }
         } else {
-            subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-danger">Klasör okunamadı: ${data.error}</div>`;
+            subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-danger"><i class="fa-solid fa-circle-exclamation"></i> Klasör okunamadı: ${escapeHtml(data.error)}</div>`;
+            if (folderCountLabel) folderCountLabel.textContent = 'Erişim Hatası';
         }
     } catch (err) {
-        subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-danger">Hata: ${err.message}</div>`;
+        subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-danger"><i class="fa-solid fa-circle-exclamation"></i> Bağlantı hatası: ${escapeHtml(err.message)}</div>`;
+        if (folderCountLabel) folderCountLabel.textContent = 'Bağlantı Hatası';
     }
 }
 
+function renderBreadcrumbs(fullPath) {
+    if (!breadcrumbsList) return;
+    breadcrumbsList.innerHTML = '';
+    if (!fullPath) return;
+
+    // Handle UNC paths like \\192.168.2.7\Dosya_Sunucusu\Planlama
+    if (fullPath.startsWith('\\\\')) {
+        const parts = fullPath.substring(2).split('\\').filter(Boolean);
+        if (parts.length >= 2) {
+            const uncRoot = `\\\\${parts[0]}\\${parts[1]}`;
+            const rootPill = document.createElement('span');
+            rootPill.className = 'breadcrumb-pill' + (parts.length === 2 ? ' active' : '');
+            rootPill.innerHTML = `<i class="fa-solid fa-server text-primary"></i> ${escapeHtml(parts[0])}\\${escapeHtml(parts[1])}`;
+            rootPill.addEventListener('click', () => loadFolderTree(uncRoot));
+            breadcrumbsList.appendChild(rootPill);
+
+            let cumulative = uncRoot;
+            for (let i = 2; i < parts.length; i++) {
+                const sep = document.createElement('span');
+                sep.className = 'breadcrumb-sep';
+                sep.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+                breadcrumbsList.appendChild(sep);
+
+                cumulative += '\\' + parts[i];
+                const pill = document.createElement('span');
+                pill.className = 'breadcrumb-pill' + (i === parts.length - 1 ? ' active' : '');
+                pill.textContent = parts[i];
+                const targetP = cumulative;
+                pill.addEventListener('click', () => loadFolderTree(targetP));
+                breadcrumbsList.appendChild(pill);
+            }
+            return;
+        }
+    }
+
+    // Standard Windows drive paths: C:\Users\name\...
+    const parts = fullPath.split('\\').filter(Boolean);
+    let cumulative = '';
+    parts.forEach((p, idx) => {
+        if (idx === 0) {
+            cumulative = p.includes(':') ? (p + '\\') : p;
+        } else {
+            cumulative += (cumulative.endsWith('\\') ? '' : '\\') + p;
+        }
+
+        if (idx > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'breadcrumb-sep';
+            sep.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+            breadcrumbsList.appendChild(sep);
+        }
+
+        const pill = document.createElement('span');
+        pill.className = 'breadcrumb-pill' + (idx === parts.length - 1 ? ' active' : '');
+        pill.innerHTML = idx === 0 ? `<i class="fa-solid fa-hard-drive text-primary"></i> ${escapeHtml(p)}` : escapeHtml(p);
+        const targetP = cumulative;
+        pill.addEventListener('click', () => loadFolderTree(targetP));
+        breadcrumbsList.appendChild(pill);
+    });
+}
+
+function renderSidebarDrives(drives, currentDir) {
+    if (!sidebarDrivesList) return;
+    sidebarDrivesList.innerHTML = '';
+    const list = ensureArray(drives);
+    list.forEach(d => {
+        if (!d || !d.name) return;
+        const btn = document.createElement('button');
+        const isCurrent = currentDir && currentDir.toUpperCase().startsWith(d.name.toUpperCase());
+        btn.className = 'sidebar-item' + (isCurrent ? ' active' : '');
+        btn.innerHTML = `<i class="fa-solid fa-hard-drive"></i> ${escapeHtml(d.name)}`;
+        btn.addEventListener('click', () => loadFolderTree(d.path));
+        sidebarDrivesList.appendChild(btn);
+    });
+}
+
+function renderSubfoldersList(subfolders) {
+    if (!subfoldersList) return;
+    subfoldersList.innerHTML = '';
+
+    const list = ensureArray(subfolders);
+    const filter = folderFilterInput ? folderFilterInput.value.trim().toLowerCase() : '';
+    const filtered = filter ? list.filter(s => s && s.name && s.name.toLowerCase().includes(filter)) : list;
+
+    if (!filtered || filtered.length === 0) {
+        subfoldersList.innerHTML = `<div class="subfolder-card-placeholder text-dim"><i class="fa-solid fa-folder-open"></i> ${filter ? 'Filtreye uygun alt klasör bulunamadı.' : 'Bu klasörde alt klasör yok.'}</div>`;
+        return;
+    }
+
+    filtered.forEach(sub => {
+        if (!sub || !sub.name) return;
+        const card = document.createElement('div');
+        card.className = 'folder-card-item';
+        if (selectedSubfolderPath === sub.path) card.classList.add('selected');
+
+        card.innerHTML = `
+            <i class="fa-solid fa-folder"></i>
+            <span title="${escapeHtml(sub.name)}">${escapeHtml(sub.name)}</span>
+        `;
+
+        // Click to select
+        card.addEventListener('click', () => {
+            document.querySelectorAll('.folder-card-item').forEach(c => c.classList.remove('selected'));
+            card.classList.add('selected');
+            selectedSubfolderPath = sub.path;
+            if (selectedPathDisplay) selectedPathDisplay.textContent = sub.path;
+            modalFolderPathInput.value = sub.path;
+        });
+
+        // Double click to enter
+        card.addEventListener('dblclick', () => {
+            loadFolderTree(sub.path);
+        });
+
+        subfoldersList.appendChild(card);
+    });
+}
+
 function selectFolderFromModal() {
-    const selected = modalFolderPathInput.value.trim();
+    const selected = (selectedSubfolderPath || modalFolderPathInput.value || currentBrowserDir).trim();
     if (selected) {
         folderPathInput.value = selected;
         folderPathInput.title = selected;

@@ -227,7 +227,7 @@
                     <div class="card-header table-header">
                         <div class="header-title">
                             <i class="fa-solid fa-table-list"></i>
-                            <h2>Tarama & Önizleme Sonuçları</h2>
+                            <h2 id="tableTitle">Tarama & Önizleme Sonuçları</h2>
                         </div>
                         <div class="table-actions">
                             <div class="search-box">
@@ -451,47 +451,87 @@
 
     </div>
 
-    <!-- FOLDER BROWSER MODAL -->
+    <!-- MODERN FOLDER BROWSER MODAL -->
     <div id="folderBrowserModal" class="modal">
-        <div class="modal-content glass-card folder-modal-content">
-            <div class="modal-header">
-                <h3><i class="fa-solid fa-folder-tree"></i> Görsel Klasör Seçici (Gözat)</h3>
+        <div class="modal-content glass-card folder-modal-modern">
+            <div class="modal-header explorer-header">
+                <div class="explorer-title">
+                    <i class="fa-solid fa-folder-open text-primary"></i>
+                    <h3>Klasör Gezgini & Seçici</h3>
+                </div>
                 <button class="modal-close" id="btnFolderModalClose">&times;</button>
             </div>
-            <div class="modal-body">
-                <!-- Quick Shortcuts Chips -->
-                <div class="folder-shortcuts">
-                    <small class="text-dim display-block mb-1">Hızlı Yol Seçimi:</small>
-                    <div class="shortcuts-chips">
-                        <button class="chip-btn" id="btnShortcutDesktop"><i class="fa-solid fa-desktop"></i> Masaüstü</button>
-                        <button class="chip-btn" id="btnShortcutDownloads"><i class="fa-solid fa-download"></i> İndirilenler</button>
-                        <button class="chip-btn" id="btnShortcutProject"><i class="fa-solid fa-folder"></i> Proje Klasörü</button>
-                        <button class="chip-btn" id="btnShortcutC"><i class="fa-solid fa-hard-drive"></i> C:\</button>
-                        <button class="chip-btn" id="btnShortcutD"><i class="fa-solid fa-hard-drive"></i> D:\</button>
+
+            <!-- Top Toolbar & Breadcrumb Bar -->
+            <div class="explorer-toolbar">
+                <div class="nav-button-group">
+                    <button id="btnPathBack" class="btn-icon" title="Geri"><i class="fa-solid fa-arrow-left"></i></button>
+                    <button id="btnPathUp" class="btn-icon" title="Üst Klasöre Çık"><i class="fa-solid fa-arrow-up"></i></button>
+                    <button id="btnPathRefresh" class="btn-icon" title="Yenile"><i class="fa-solid fa-rotate-right"></i></button>
+                </div>
+
+                <!-- Interactive Breadcrumb & Direct Input -->
+                <div class="breadcrumb-container" id="breadcrumbContainer">
+                    <div class="breadcrumbs-list" id="breadcrumbsList"></div>
+                    <input type="text" id="modalFolderPathInput" class="path-direct-input hidden" placeholder="Klasör yolu girin (Örn: \\192.168.2.7\Paylasim veya C:\Klasor)">
+                    <button id="btnTogglePathInput" class="btn-icon btn-edit-path" title="Yolu Elle Düzenle / Yapıştır"><i class="fa-solid fa-pen-to-square"></i></button>
+                </div>
+
+                <!-- Live Subfolder Filter -->
+                <div class="folder-search-box">
+                    <i class="fa-solid fa-filter"></i>
+                    <input type="text" id="folderFilterInput" placeholder="Alt klasörlerde ara...">
+                </div>
+            </div>
+
+            <!-- Explorer Main Body: Sidebar + File List -->
+            <div class="explorer-body">
+                <!-- Left Sidebar: Quick Access & Drives -->
+                <div class="explorer-sidebar">
+                    <div class="sidebar-section">
+                        <span class="sidebar-heading"><i class="fa-solid fa-star"></i> Hızlı Konumlar</span>
+                        <button class="sidebar-item" id="btnShortcutDesktop"><i class="fa-solid fa-desktop"></i> Masaüstü</button>
+                        <button class="sidebar-item" id="btnShortcutDownloads"><i class="fa-solid fa-download"></i> İndirilenler</button>
+                        <button class="sidebar-item" id="btnShortcutProject"><i class="fa-solid fa-folder-closed"></i> Proje Klasörü</button>
+                    </div>
+
+                    <div class="sidebar-section mt-3">
+                        <span class="sidebar-heading"><i class="fa-solid fa-hard-drive"></i> Sürücüler</span>
+                        <div id="sidebarDrivesList" class="sidebar-drives-list">
+                            <!-- Dynamically loaded drives -->
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section mt-3">
+                        <span class="sidebar-heading"><i class="fa-solid fa-network-wired"></i> Ağ Paylaşımı</span>
+                        <button class="sidebar-item" id="btnQuickNetworkUNC"><i class="fa-solid fa-server"></i> Ağ Yolu Yapıştır (UNC)...</button>
                     </div>
                 </div>
 
-                <!-- Current Path Bar -->
-                <div class="input-group mt-3">
-                    <label>Seçilen Klasör Yolu</label>
-                    <div class="path-navigation-bar">
-                        <button id="btnPathUp" class="btn btn-secondary" title="Üst Klasöre Çık"><i class="fa-solid fa-arrow-up"></i> Üst Klasör</button>
-                        <input type="text" id="modalFolderPathInput" placeholder="C:\Klasor\Yolu..." value="">
+                <!-- Right Main Content: Subfolders Grid/List -->
+                <div class="explorer-content">
+                    <div class="explorer-content-header">
+                        <span id="folderCountLabel" class="text-dim text-sm">Yükleniyor...</span>
+                        <small class="text-dim">Girmek için çift tıklayın veya Seç'e basın</small>
                     </div>
-                </div>
-
-                <!-- Subfolders Grid -->
-                <div class="subfolders-section mt-3">
-                    <small class="text-dim display-block mb-2">Klasörler (Girmek için tıklayın):</small>
-                    <div id="subfoldersList" class="subfolders-grid">
-                        <div class="subfolder-card-placeholder">Yükleniyor...</div>
+                    <div id="subfoldersList" class="explorer-folders-list">
+                        <div class="subfolder-card-placeholder"><i class="fa-solid fa-spinner fa-spin"></i> Klasörler yükleniyor...</div>
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button id="btnSelectCurrentFolder" class="btn btn-primary btn-block btn-lg">
-                    <i class="fa-solid fa-check"></i> Bu Klasörü Seç ve Tara
-                </button>
+
+            <!-- Footer with Selected Folder Info and Actions -->
+            <div class="modal-footer explorer-footer">
+                <div class="selected-path-preview">
+                    <span class="text-dim text-xs display-block">Seçili Çalışma Dizini:</span>
+                    <strong id="selectedPathDisplay" class="selected-path-text text-truncate">Henüz seçilmedi</strong>
+                </div>
+                <div class="footer-actions">
+                    <button class="btn btn-secondary" id="btnCancelFolderModal">İptal</button>
+                    <button id="btnSelectCurrentFolder" class="btn btn-primary btn-lg">
+                        <i class="fa-solid fa-check"></i> Bu Klasörü Seç ve Tara
+                    </button>
+                </div>
             </div>
         </div>
     </div>

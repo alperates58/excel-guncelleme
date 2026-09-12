@@ -30,6 +30,52 @@ if (Test-Path $managerScript) {
     exit 1
 }
 
+function Open-ApplicationBrowser ([string]$url) {
+    $chromePaths = @(
+        "chrome.exe",
+        "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "${env:LocalAppData}\Google\Chrome\Application\chrome.exe"
+    )
+
+    $opened = $false
+    foreach ($cp in $chromePaths) {
+        try {
+            if ($cp -eq "chrome.exe") {
+                $cmd = Get-Command "chrome.exe" -ErrorAction SilentlyContinue
+                if ($cmd) {
+                    Start-Process -FilePath "chrome.exe" -ArgumentList $url -ErrorAction Stop
+                    $opened = $true
+                    break
+                }
+            } elseif (Test-Path $cp) {
+                Start-Process -FilePath $cp -ArgumentList $url -ErrorAction Stop
+                $opened = $true
+                break
+            }
+        } catch { }
+    }
+
+    if (-not $opened) {
+        try { Start-Process $url } catch { }
+    }
+}
+
+# Check if server is already running on this port
+try {
+    $existing = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 1 -ErrorAction Stop
+    if ($existing -and $existing.status -eq "ok") {
+        Write-Host "=================================================================" -ForegroundColor Green
+        Write-Host " Excel Bulk Updater zaten Port $Port uzerinde aktif calisiyor!" -ForegroundColor Cyan
+        Write-Host " Tarayici Chrome ile aciliyor: http://127.0.0.1:$Port/" -ForegroundColor Yellow
+        Write-Host "=================================================================" -ForegroundColor Green
+        if (-not $NoBrowser -and -not $env:EXCEL_UPDATER_NO_BROWSER) {
+            Open-ApplicationBrowser "http://127.0.0.1:$Port/"
+        }
+        exit 0
+    }
+} catch { }
+
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$Port/")
 $listener.Prefixes.Add("http://127.0.0.1:$Port/")
@@ -37,19 +83,30 @@ $listener.Prefixes.Add("http://127.0.0.1:$Port/")
 try {
     $listener.Start()
 } catch {
-    Write-Host "Failed to start server on port $Port. Error: $_"
+    # If starting failed, verify if another instance just responded
+    try {
+        $existing = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 1 -ErrorAction Stop
+        if ($existing -and $existing.status -eq "ok") {
+            Write-Host "Excel Bulk Updater zaten Port $Port uzerinde aktif. Tarayici aciliyor..." -ForegroundColor Yellow
+            if (-not $NoBrowser -and -not $env:EXCEL_UPDATER_NO_BROWSER) {
+                Open-ApplicationBrowser "http://127.0.0.1:$Port/"
+            }
+            exit 0
+        }
+    } catch { }
+
+    Write-Host "Failed to start server on port $Port. Error: $_" -ForegroundColor Red
+    Write-Host "Ipucu: Port $Port baska bir program veya acik kalmis bir sunucu tarafindan kullaniliyor olabilir." -ForegroundColor Yellow
     exit 1
 }
 
 Write-Host "=================================================================" -ForegroundColor Green
 Write-Host " Excel Bulk Updater Server is running on http://127.0.0.1:$Port/" -ForegroundColor Cyan
-Write-Host " Open your browser to: http://127.0.0.1:$Port/" -ForegroundColor Yellow
+Write-Host " Chrome tarayici aciliyor: http://127.0.0.1:$Port/" -ForegroundColor Yellow
 Write-Host "=================================================================" -ForegroundColor Green
 
 if (-not $NoBrowser -and -not $env:EXCEL_UPDATER_NO_BROWSER) {
-    try {
-        Start-Process "http://127.0.0.1:$Port/"
-    } catch { }
+    Open-ApplicationBrowser "http://127.0.0.1:$Port/"
 }
 
 $publicDir = Join-Path $PSScriptRoot "public"
@@ -299,27 +356,35 @@ while ($listener.IsListening) {
 
         if ($path -eq "/api/list-folders" -and $request.HttpMethod -eq "POST") {
             $data = Read-RequestBody $request
-            $targetDir = if ($data -and $data.directory -and (Test-Path $data.directory)) { $data.directory } else { (Get-Location).Path }
+            $targetDir = if ($data -and $data.directory -and (Test-Path -LiteralPath $data.directory)) { $data.directory } else { (Get-Location).Path }
             
             try {
-                $dirObj = Get-Item $targetDir
-                $parentDir = if ($dirObj.Parent) { $dirObj.Parent.FullName } else { "" }
+                $dirObj = Get-Item -LiteralPath $targetDir -ErrorAction Stop
+                $currentDir = $dirObj.FullName
+                $parentDir = if ($dirObj.Parent) { $dirObj.Parent.FullName } else { (Split-Path -Path $currentDir -Parent) }
                 
-                $subDirs = Get-ChildItem -Path $targetDir -Directory -ErrorAction SilentlyContinue | 
-                    Select-Object Name, FullName | 
-                    ForEach-Object { @{ name = $_.Name; path = $_.FullName } }
+                $subDirsList = @()
+                $rawSubDirs = Get-ChildItem -LiteralPath $currentDir -Directory -ErrorAction SilentlyContinue
+                if ($rawSubDirs) {
+                    foreach ($sd in $rawSubDirs) {
+                        $subDirsList += @{ name = "$($sd.Name)"; path = "$($sd.FullName)" }
+                    }
+                }
 
-                $drives = @()
-                if ([string]::IsNullOrWhiteSpace($parentDir)) {
-                    $drives = Get-PSDrive -PSProvider FileSystem | ForEach-Object { @{ name = "$($_.Name):\"; path = "$($_.Root)" } }
+                $drivesList = @()
+                $rawDrives = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue
+                if ($rawDrives) {
+                    foreach ($d in $rawDrives) {
+                        $drivesList += @{ name = "$($d.Name):\"; path = "$($d.Root)" }
+                    }
                 }
 
                 $res = @{
                     success = $true
-                    currentDir = $dirObj.FullName
-                    parentDir = $parentDir
-                    subFolders = if ($subDirs) { $subDirs } else { @() }
-                    drives = $drives
+                    currentDir = $currentDir
+                    parentDir = if ($parentDir) { $parentDir } else { "" }
+                    subFolders = @($subDirsList)
+                    drives = @($drivesList)
                 }
                 Send-JsonResponse $response $res
             } catch {
@@ -356,7 +421,8 @@ while ($listener.IsListening) {
             $data = Read-RequestBody $request
             $targetDir = if ($data -and $data.directory) { $data.directory } else { (Get-Location).Path }
 
-            if ($data -and $data.async -eq $true) {
+            # If async requested or default (not explicitly false)
+            if ($null -eq $data -or $data.async -ne $false) {
                 $reg = Register-Operation -Type "SCAN" -Directory $targetDir
                 if (-not $reg.success) {
                     Send-JsonResponse $response $reg 409

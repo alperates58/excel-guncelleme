@@ -285,6 +285,8 @@ function Register-Operation {
             options = $optHt
             rules = $cleanRules
             logs = @()
+            scannedFiles = @()
+            detectedIPs = @()
             resultData = $null
         }
 
@@ -463,9 +465,39 @@ function Get-OperationSnapshot ([string]$OperationId) {
             options         = Protect-SensitiveData $src.options
             rules           = Protect-SensitiveData $src.rules
             logs            = @($src.logs)
+            scannedFiles    = if ($src.scannedFiles) { @($src.scannedFiles) } else { @() }
+            detectedIPs     = if ($src.detectedIPs) { @($src.detectedIPs) } else { @() }
             resultData      = Protect-SensitiveData $src.resultData
         }
         return $snapshot
+    } finally {
+        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+    }
+}
+
+function Append-OperationScannedFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][hashtable]$FileDetail,
+        [hashtable]$IpSummary = @{}
+    )
+
+    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    try {
+        if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return }
+        $op = $global:OperationsRegistry[$OperationId]
+        if (-not $op.ContainsKey("scannedFiles") -or $null -eq $op["scannedFiles"]) {
+            $op["scannedFiles"] = @()
+        }
+        $op["scannedFiles"] += $FileDetail
+
+        if ($IpSummary -and $IpSummary.Count -gt 0) {
+            $ipList = @()
+            foreach ($k in $IpSummary.Keys) {
+                $ipList += @{ ip = "$k"; count = [int]$IpSummary[$k] }
+            }
+            $op["detectedIPs"] = $ipList
+        }
     } finally {
         [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
     }
@@ -745,13 +777,17 @@ function Write-AuditLogEvent {
 
     [System.Threading.Monitor]::Enter($global:AuditLogLock)
     try {
-        $writer = [System.IO.File]::AppendText($logFilePath)
         try {
-            $writer.WriteLine($jsonLine)
-            $writer.Flush()
-        } finally {
-            $writer.Close()
-            $writer.Dispose()
+            $writer = [System.IO.File]::AppendText($logFilePath)
+            try {
+                $writer.WriteLine($jsonLine)
+                $writer.Flush()
+            } finally {
+                $writer.Close()
+                $writer.Dispose()
+            }
+        } catch {
+            # Audit log writing failure must never crash the operational worker
         }
     } finally {
         [System.Threading.Monitor]::Exit($global:AuditLogLock)
@@ -874,35 +910,35 @@ function Start-AsyncOperationWorker {
         param($opId, $repoRoot, $engineScript, $mgrScript)
         
         $ErrorActionPreference = "Stop"
-        
-        # 1. Explicitly bootstrap dependencies in the new STA runspace (Rule 2)
-        if (Test-Path $mgrScript) { . $mgrScript }
-        if (Test-Path $engineScript) { . $engineScript }
-
-        # 2. Transition state to RUNNING
-        Set-OperationStatus $opId "RUNNING" "Initializing" | Out-Null
-        Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_STARTED" -Message "Worker started in STA runspace"
-
-        $type = ""
-        $dir = ""
-        $rules = @()
-        $options = @{}
-
-        [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
-        try {
-            if ($global:OperationsRegistry.ContainsKey($opId)) {
-                $rawOp = $global:OperationsRegistry[$opId]
-                $type = "$($rawOp.type)"
-                $dir = "$($rawOp.directory)"
-                $rules = @($rawOp.rules)
-                $options = if ($rawOp.options) { @($rawOp.options)[0] } else { @{} }
-            }
-        } finally {
-            [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
-        }
-
         $result = $null
         try {
+            # 1. Explicitly bootstrap dependencies in the new STA runspace (Rule 2)
+            if (Test-Path $mgrScript) { . $mgrScript }
+            if (Test-Path $engineScript) { . $engineScript }
+
+            # 2. Transition state to RUNNING
+            Set-OperationStatus $opId "RUNNING" "Initializing" | Out-Null
+            try {
+                Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_STARTED" -Message "Worker started in STA runspace"
+            } catch { }
+
+            $type = ""
+            $dir = ""
+            $rules = @()
+            $options = @{}
+
+            [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+            try {
+                if ($global:OperationsRegistry.ContainsKey($opId)) {
+                    $rawOp = $global:OperationsRegistry[$opId]
+                    $type = "$($rawOp.type)"
+                    $dir = "$($rawOp.directory)"
+                    $rules = @($rawOp.rules)
+                    $options = if ($rawOp.options) { @($rawOp.options)[0] } else { @{} }
+                }
+            } finally {
+                [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+            }
             switch ($type) {
                 "UPDATE" {
                     $result = Update-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
@@ -911,7 +947,7 @@ function Start-AsyncOperationWorker {
                     $result = Preview-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
                 }
                 "SCAN" {
-                    $result = Scan-ExcelDirectory -DirectoryPath $dir
+                    $result = Scan-ExcelDirectory -DirectoryPath $dir -OperationId $opId
                 }
                 "RESTORE" {
                     $backupDir = if ($options -and $options.backupDir) { $options.backupDir } else { "" }
