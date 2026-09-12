@@ -7,6 +7,7 @@ const API_BASE = window.location.origin + '/api';
 let currentScanData = null;
 let activeOperationId = null;
 let activeOpPollingInterval = null;
+let currentOperationLogPath = '';
 let serverWorkspace = '';
 let userDesktop = '';
 let userDownloads = '';
@@ -295,6 +296,19 @@ function appendLog(message, type = 'info') {
     entry.textContent = `[${time}] ${message}`;
     logConsole.appendChild(entry);
     logConsole.scrollTop = logConsole.scrollHeight;
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 5000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const mergedOptions = { ...options, signal: controller.signal };
+        const res = await fetch(url, mergedOptions);
+        const data = await res.json();
+        return { res, data };
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 // ------------------------------------------------------------------------------
@@ -676,20 +690,19 @@ async function runScan() {
     isScanning = true;
 
     try {
-        const res = await fetch(`${API_BASE}/scan`, {
+        const { res, data } = await fetchJsonWithTimeout(`${API_BASE}/scan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ directory: dir, async: true })
-        });
+        }, 10000);
 
         if (res.status === 409) {
-            const conflict = await res.json();
+            const conflict = data;
             alert(`Şu anda devam eden bir işlem var (${conflict.activeType || 'İşlem'}). Lütfen bitmesini bekleyin.`);
             resetScanUI();
             return;
         }
 
-        const data = await res.json();
         if (!data.success && !data.operationId) {
             appendLog(`Tarama başlatılamadı: ${data.error}`, 'error');
             alert(`Tarama başlatılamadı: ${data.error}`);
@@ -698,6 +711,10 @@ async function runScan() {
         }
 
         activeOperationId = data.operationId;
+        currentOperationLogPath = data.auditLogPath || '';
+        if (currentOperationLogPath) {
+            appendLog(`Operasyon log dosyası: ${currentOperationLogPath}`, 'info');
+        }
         btnScan.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Taranıyor...`;
 
         pollScanProgress(activeOperationId, dir);
@@ -714,13 +731,33 @@ function pollScanProgress(opId, dir) {
     let cumulativeQueries = 0;
     let cumulativeConnections = 0;
     let cumulativeVba = 0;
+    let pollInFlight = false;
+    let lastActivityAt = Date.now();
+    let lastWarningAt = 0;
+    let lastSignature = '';
 
     activeOpPollingInterval = setInterval(async () => {
+        if (pollInFlight) return;
+        pollInFlight = true;
         try {
-            const res = await fetch(`${API_BASE}/operations/${opId}`);
-            const data = await res.json();
+            const { data } = await fetchJsonWithTimeout(`${API_BASE}/operations/${opId}`, {}, 5000);
             const snap = (data && data.operation) ? data.operation : data;
             if (!snap) return;
+            if (snap.auditLogPath) currentOperationLogPath = snap.auditLogPath;
+
+            const signature = [
+                snap.status || '',
+                snap.currentStage || '',
+                snap.currentFile || '',
+                snap.progressPercent || 0,
+                snap.processedFiles || 0,
+                snap.totalFiles || 0,
+                ensureArray(snap.scannedFiles).length
+            ].join('|');
+            if (signature !== lastSignature) {
+                lastSignature = signature;
+                lastActivityAt = Date.now();
+            }
 
             // 1. Update Progress Bar & Percentage
             const pct = Math.min(100, Math.max(0, snap.progressPercent || 0));
@@ -854,8 +891,27 @@ function pollScanProgress(opId, dir) {
                 btnCancelOperation.style.display = 'none';
                 appendLog(`Tarama hatası: ${errDetail}`, 'error');
             }
+
+            const idleMs = Date.now() - lastActivityAt;
+            if (!['COMPLETED', 'FAILED', 'CANCELLED'].includes(snap.status) && idleMs > 15000 && Date.now() - lastWarningAt > 15000) {
+                lastWarningAt = Date.now();
+                const seconds = Math.round(idleMs / 1000);
+                const logHint = currentOperationLogPath ? ` Log: ${currentOperationLogPath}` : '';
+                progressStatusText.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-warning"></i> Sunucudan ${seconds} sn'dir yeni tarama durumu gelmedi. İşlem Excel COM veya dosya erişiminde bekliyor olabilir.`;
+                appendLog(`Progress ${seconds} sn'dir değişmedi.${logHint}`, 'warning');
+            }
         } catch (err) {
+            const idleMs = Date.now() - lastActivityAt;
+            if (idleMs > 8000 && Date.now() - lastWarningAt > 15000) {
+                lastWarningAt = Date.now();
+                const seconds = Math.round(idleMs / 1000);
+                const logHint = currentOperationLogPath ? ` Log: ${currentOperationLogPath}` : '';
+                progressStatusText.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-warning"></i> ${seconds} sn'dir progress yanıtı alınamıyor. Sunucu isteği bloke olmuş olabilir.`;
+                appendLog(`Progress endpoint ${seconds} sn'dir yanıt vermiyor.${logHint}`, 'warning');
+            }
             console.error('Scan polling error:', err);
+        } finally {
+            pollInFlight = false;
         }
     }, 400);
 }

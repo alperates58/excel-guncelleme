@@ -207,10 +207,18 @@ function Copy-FileWithShare ($srcPath, $dstPath) {
 }
 
 function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
+    if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_STARTED" -Stage "Preflight" -Message "Excel directory scan requested" -Data @{ directory = $DirectoryPath }
+    }
+
     $files = Get-ExcelFiles $DirectoryPath
     $fileList = @()
     $ipSummary = @{}
     $totalCount = $files.Count
+
+    if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_ENUMERATION_COMPLETED" -Stage "Preflight" -Message "Excel files enumerated" -Data @{ directory = $DirectoryPath; totalFiles = $totalCount }
+    }
 
     Set-ProgressState $true "scan" 0 $totalCount "Taramaya Başlanıyor..."
     if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
@@ -221,6 +229,9 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
         Set-ProgressState $false "scan" 0 0 ""
         if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
             $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles 0 -CurrentFile "Dosya Bulunamadı" -CurrentStage "Completed" -ProgressPercent 100
+        }
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_COMPLETED_EMPTY" -Stage "Completed" -Message "No Excel files found in directory" -Data @{ directory = $DirectoryPath }
         }
         return @{
             success = $true
@@ -234,6 +245,9 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
 
     $excel = $null
     try {
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "EXCEL_COM_INITIALIZING" -Stage "Excel COM" -Message "Creating Excel.Application COM object"
+        }
         $excel = New-Object -ComObject Excel.Application
         $excel.Visible = $false
         $excel.DisplayAlerts = $false
@@ -243,8 +257,14 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
         try {
             $excel.AutomationSecurity = 3 # msoAutomationSecurityForceDisable
         } catch { }
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "EXCEL_COM_READY" -Stage "Excel COM" -Message "Excel.Application COM object is ready" -Data @{ version = "$($excel.Version)" }
+        }
     } catch {
         Set-ProgressState $false "scan" 0 0 ""
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "ERROR" -EventName "EXCEL_COM_INITIALIZE_FAILED" -Stage "Excel COM" -Message "Could not initialize Excel COM object: $_"
+        }
         return @{
             success = $false
             error = "Could not initialize Excel COM object: $_"
@@ -269,6 +289,9 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
         if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
             $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile $file.Name -CurrentStage "Scanning" -ProgressPercent $pct
         }
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_STARTED" -File $file.FullName -Stage "WorkbookOpen" -Message "Opening workbook for read-only scan" -Data @{ index = $processedCount; totalFiles = $totalCount; sizeBytes = $file.Length; extension = $file.Extension }
+        }
 
         $fileDetail = @{
             filePath = $file.FullName
@@ -285,6 +308,9 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
 
         try {
             $wb = $excel.Workbooks.Open($file.FullName, 0, $true, [Type]::Missing, [Type]::Missing, [Type]::Missing, $true) # Read-only open, IgnoreReadOnlyRecommended
+            if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_WORKBOOK_OPENED" -File $file.FullName -Stage "WorkbookOpen" -Message "Workbook opened successfully"
+            }
 
             # 1. Check Power Queries
             try {
@@ -307,7 +333,11 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         $ipSummary[$ip]++
                     }
                 }
-            } catch { }
+            } catch {
+                if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                    Write-AuditLogEvent -OperationId $OperationId -Level "WARNING" -EventName "SCAN_POWER_QUERY_READ_FAILED" -File $file.FullName -Stage "Power Query" -Message "$_"
+                }
+            }
 
             # 2. Check ALL Data Connections
             try {
@@ -343,7 +373,11 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         $ipSummary[$ip]++
                     }
                 }
-            } catch { }
+            } catch {
+                if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                    Write-AuditLogEvent -OperationId $OperationId -Level "WARNING" -EventName "SCAN_CONNECTION_READ_FAILED" -File $file.FullName -Stage "Connections" -Message "$_"
+                }
+            }
 
             # 3. Check Worksheet QueryTables
             try {
@@ -362,7 +396,11 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         }
                     }
                 }
-            } catch { }
+            } catch {
+                if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                    Write-AuditLogEvent -OperationId $OperationId -Level "WARNING" -EventName "SCAN_QUERYTABLE_READ_FAILED" -File $file.FullName -Stage "QueryTables" -Message "$_"
+                }
+            }
 
             # 4. Check VBA Macros
             if ($file.Extension.ToLower() -in @(".xlsm", ".xlsb")) {
@@ -390,13 +428,22 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                     }
                 } catch {
                     $fileDetail.vbaWarning = "VBA access restricted or protected."
+                    if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                        Write-AuditLogEvent -OperationId $OperationId -Level "WARNING" -EventName "SCAN_VBA_READ_FAILED" -File $file.FullName -Stage "VBA" -Message "$_"
+                    }
                 }
             }
 
             $wb.Close($false)
             [System.Runtime.Interopservices.Marshal]::ReleaseComObject($wb) | Out-Null
+            if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_COMPLETED" -File $file.FullName -Stage "Completed" -Message "Workbook scan completed" -Data @{ foundIpCount = @($fileDetail.foundIPs).Count; queryCount = @($fileDetail.queries).Count; connectionCount = @($fileDetail.connections).Count; vbaMatchCount = @($fileDetail.vbaMatches).Count }
+            }
         } catch {
             $fileDetail.status = "Error: $_"
+            if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+                Write-AuditLogEvent -OperationId $OperationId -Level "ERROR" -EventName "SCAN_FILE_FAILED" -File $file.FullName -Stage "File Scan" -Message "$_"
+            }
         }
 
         $fileList += $fileDetail
@@ -410,6 +457,9 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
 
     if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
         $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile "Tamamlandı" -CurrentStage "Completed" -ProgressPercent 100
+    }
+    if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_COMPLETED" -Stage "Completed" -Message "Excel directory scan completed" -Data @{ directory = $DirectoryPath; processedFiles = $processedCount; totalFiles = $totalCount; detectedIpCount = $ipSummary.Count }
     }
 
     $detectedIPsList = @()

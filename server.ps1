@@ -21,6 +21,8 @@ if (Test-Path $engineScript) {
 $managerScript = Join-Path $PSScriptRoot "engine\operation_manager.ps1"
 if (Test-Path $managerScript) {
     . $managerScript
+    $global:AuditLogDirectory = Resolve-WritableLogDirectory -PreferredDirectory (Join-Path $PSScriptRoot "logs")
+    [System.AppDomain]::CurrentDomain.SetData("AuditLogDirectory", $global:AuditLogDirectory)
     try {
         Recover-StaleOperations -RepoRoot $PSScriptRoot | Out-Null
         Write-AuditLogEvent -OperationId "SERVER_STARTUP" -Level "INFO" -EventName "SERVER_INITIALIZED" -Message "Excel Bulk Updater server started on port $Port"
@@ -187,6 +189,8 @@ while ($listener.IsListening) {
                 status = "ok"
                 port = $Port
                 workspace = (Get-Location).Path
+                buildMarker = "audit-log-watchdog-20260912"
+                auditLogDirectory = $global:AuditLogDirectory
                 userDesktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
                 userDownloads = Join-Path $env:USERPROFILE "Downloads"
                 excelInstalled = $true
@@ -344,11 +348,21 @@ while ($listener.IsListening) {
                 continue
             }
 
-            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            $workerStarted = Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot
+            if (-not $workerStarted) {
+                Send-JsonResponse $response @{
+                    success = $false
+                    operationId = $reg.operationId
+                    error = "Restore worker başlatılamadı. Detay için operasyon loguna bakın."
+                    auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
+                } 500
+                continue
+            }
             Send-JsonResponse $response @{
                 success = $true
                 operationId = $reg.operationId
                 status = "QUEUED"
+                auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
                 message = "Restore operation registered and queued"
             } 202
             continue
@@ -428,11 +442,21 @@ while ($listener.IsListening) {
                     Send-JsonResponse $response $reg 409
                     continue
                 }
-                Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+                $workerStarted = Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot
+                if (-not $workerStarted) {
+                    Send-JsonResponse $response @{
+                        success = $false
+                        operationId = $reg.operationId
+                        error = "Tarama worker başlatılamadı. Detay için operasyon loguna bakın."
+                        auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
+                    } 500
+                    continue
+                }
                 Send-JsonResponse $response @{
                     success = $true
                     operationId = $reg.operationId
                     status = "QUEUED"
+                    auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
                     message = "Scan operation registered and queued"
                 } 202
                 continue
@@ -474,11 +498,21 @@ while ($listener.IsListening) {
                 continue
             }
 
-            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            $workerStarted = Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot
+            if (-not $workerStarted) {
+                Send-JsonResponse $response @{
+                    success = $false
+                    operationId = $reg.operationId
+                    error = "Önizleme worker başlatılamadı. Detay için operasyon loguna bakın."
+                    auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
+                } 500
+                continue
+            }
             Send-JsonResponse $response @{
                 success = $true
                 operationId = $reg.operationId
                 status = "QUEUED"
+                auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
                 message = "Preview operation registered and queued"
             } 202
             continue
@@ -513,11 +547,21 @@ while ($listener.IsListening) {
                 continue
             }
 
-            Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot | Out-Null
+            $workerStarted = Start-AsyncOperationWorker -OperationId $reg.operationId -RepoRoot $PSScriptRoot
+            if (-not $workerStarted) {
+                Send-JsonResponse $response @{
+                    success = $false
+                    operationId = $reg.operationId
+                    error = "Güncelleme worker başlatılamadı. Detay için operasyon loguna bakın."
+                    auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
+                } 500
+                continue
+            }
             Send-JsonResponse $response @{
                 success = $true
                 operationId = $reg.operationId
                 status = "QUEUED"
+                auditLogPath = (Get-AuditLogFilePath -OperationId $reg.operationId)
                 message = "Update operation registered and queued"
             } 202
             continue
@@ -577,4 +621,3 @@ try {
     $listener.Stop()
     $listener.Close()
 } catch { }
-

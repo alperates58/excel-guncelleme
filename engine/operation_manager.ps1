@@ -27,6 +27,40 @@ if ($null -eq $domainAuditLock) {
 }
 $global:AuditLogLock = $domainAuditLock
 
+function Resolve-WritableLogDirectory {
+    param([string]$PreferredDirectory = "")
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($PreferredDirectory)) {
+        $candidates += $PreferredDirectory
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+        $candidates += (Join-Path $env:TEMP "ExcelSqlConnectPro\logs")
+    }
+
+    foreach ($candidate in $candidates) {
+        try {
+            [System.IO.Directory]::CreateDirectory($candidate) | Out-Null
+            $testPath = Join-Path $candidate ".__audit_write_test_$([System.Guid]::NewGuid().ToString('N')).tmp"
+            [System.IO.File]::WriteAllText($testPath, "test", [System.Text.Encoding]::UTF8)
+            Remove-Item -Path $testPath -Force -ErrorAction SilentlyContinue
+            return $candidate
+        } catch { }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PreferredDirectory)) {
+        return $PreferredDirectory
+    }
+    return (Join-Path (Get-Location) "logs")
+}
+
+$domainAuditDir = [System.AppDomain]::CurrentDomain.GetData("AuditLogDirectory")
+if ([string]::IsNullOrWhiteSpace($domainAuditDir)) {
+    $domainAuditDir = Resolve-WritableLogDirectory -PreferredDirectory (Join-Path (Get-Location) "logs")
+    [System.AppDomain]::CurrentDomain.SetData("AuditLogDirectory", $domainAuditDir)
+}
+$global:AuditLogDirectory = "$domainAuditDir"
+
 # Cross-Runspace in-memory registry for operation states stored in AppDomain
 $domainReg = [System.AppDomain]::CurrentDomain.GetData("OperationsRegistry")
 if ($null -eq $domainReg) {
@@ -34,19 +68,28 @@ if ($null -eq $domainReg) {
     [System.AppDomain]::CurrentDomain.SetData("OperationsRegistry", $domainReg)
 }
 $global:OperationsRegistry = $domainReg
+$global:OPERATION_LOCK_TIMEOUT_MS = 1500
+$global:LastActiveOperationId = $null
 
 function Get-ActiveOperationId () {
-    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    $lockTaken = $false
     try {
+        [System.Threading.Monitor]::TryEnter($global:OperationRegistryLock, $global:OPERATION_LOCK_TIMEOUT_MS, [ref]$lockTaken) | Out-Null
+        if (-not $lockTaken) {
+            return $global:LastActiveOperationId
+        }
         foreach ($key in $global:OperationsRegistry.Keys) {
             $existing = $global:OperationsRegistry[$key]
             if ($existing -and ($global:TERMINAL_OPERATION_STATES -notcontains $existing.status)) {
+                $global:LastActiveOperationId = $existing.operationId
                 return $existing.operationId
             }
         }
         return $null
     } finally {
-        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+        if ($lockTaken) {
+            [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+        }
     }
 }
 
@@ -211,6 +254,63 @@ function New-OperationId () {
     return "op-$ts-$rand"
 }
 
+function Get-AuditLogFilePath {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [string]$LogDirectory = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $LogDirectory = if (-not [string]::IsNullOrWhiteSpace($global:AuditLogDirectory)) { $global:AuditLogDirectory } else { Join-Path (Get-Location) "logs" }
+    }
+
+    $monthDir = Join-Path $LogDirectory (Get-Date).ToUniversalTime().ToString("yyyy-MM")
+    return (Join-Path $monthDir "$OperationId.jsonl")
+}
+
+function Write-RawAuditLogLine {
+    param(
+        [Parameter(Mandatory=$true)][string]$OperationId,
+        [Parameter(Mandatory=$true)][string]$Level,
+        [Parameter(Mandatory=$true)][string]$EventName,
+        [string]$File = "",
+        [string]$Stage = "",
+        [string]$Message = "",
+        [hashtable]$Data = @{},
+        [string]$LogDirectory = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $LogDirectory = if (-not [string]::IsNullOrWhiteSpace($global:AuditLogDirectory)) { $global:AuditLogDirectory } else { Join-Path (Get-Location) "logs" }
+    }
+
+    try {
+        $logFilePath = Get-AuditLogFilePath -OperationId $OperationId -LogDirectory $LogDirectory
+        $logDir = Split-Path -Parent $logFilePath
+        [System.IO.Directory]::CreateDirectory($logDir) | Out-Null
+
+        $logEntry = @{
+            timestamp   = (Get-Date).ToUniversalTime().ToString("o")
+            operationId = $OperationId
+            level       = $Level.ToUpper()
+            event       = $EventName.ToUpper()
+            file        = $File
+            stage       = $Stage
+            message     = (Protect-SensitiveData $Message)
+            data        = (Protect-SensitiveData $Data)
+        }
+        $jsonLine = $logEntry | ConvertTo-Json -Depth 6 -Compress
+        [System.IO.File]::AppendAllText($logFilePath, $jsonLine + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
+    } catch {
+        try {
+            [System.IO.Directory]::CreateDirectory($LogDirectory) | Out-Null
+            $fallbackPath = Join-Path $LogDirectory "audit-write-failures.log"
+            $failureLine = "$(Get-Date -Format o) operation=$OperationId event=$EventName error=$($_.Exception.Message)"
+            [System.IO.File]::AppendAllText($fallbackPath, $failureLine + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+}
+
 function Register-Operation {
     param(
         [Parameter(Mandatory=$true)][string]$Type, # SCAN | PREVIEW | UPDATE | RESTORE
@@ -288,9 +388,12 @@ function Register-Operation {
             scannedFiles = @()
             detectedIPs = @()
             resultData = $null
+            auditLogPath = Get-AuditLogFilePath -OperationId $opId
         }
 
         $global:OperationsRegistry[$opId] = $newOp
+        $global:LastActiveOperationId = $opId
+        Write-RawAuditLogLine -OperationId $opId -Level "INFO" -EventName "OPERATION_REGISTERED" -Stage "Queued" -Message "Operation registered" -Data @{ type = $Type.ToUpper(); directory = $Directory }
 
         return @{
             Success = $true
@@ -369,6 +472,8 @@ function Update-OperationProgress {
             }
         }
 
+        Write-RawAuditLogLine -OperationId $OperationId -Level "INFO" -EventName "OPERATION_PROGRESS" -Stage $op.currentStage -File $op.currentFile -Message "Operation progress updated" -Data @{ processedFiles = [int]$op.processedFiles; totalFiles = [int]$op.totalFiles; progressPercent = [int]$op.progressPercent; status = "$($op.status)" }
+
         return $true
     } finally {
         [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
@@ -434,8 +539,41 @@ function Test-OperationCancellationRequested ([string]$OperationId) {
 }
 
 function Get-OperationSnapshot ([string]$OperationId) {
-    [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
+    $lockTaken = $false
     try {
+        [System.Threading.Monitor]::TryEnter($global:OperationRegistryLock, $global:OPERATION_LOCK_TIMEOUT_MS, [ref]$lockTaken) | Out-Null
+        if (-not $lockTaken) {
+            return @{
+                id              = "$OperationId"
+                operationId     = "$OperationId"
+                type            = "UNKNOWN"
+                status          = "RUNNING"
+                createdAt       = $null
+                startedAt       = $null
+                finishedAt      = $null
+                directory       = ""
+                totalFiles      = 0
+                processedFiles  = 0
+                updatedFiles    = 0
+                skippedFiles    = 0
+                failedFiles     = 0
+                currentFile     = "Durum kilidi bekleniyor"
+                currentStage    = "State Lock Busy"
+                progressPercent = 0
+                warnings        = @("Operasyon durum kilidi $($global:OPERATION_LOCK_TIMEOUT_MS) ms icinde alinamadi. Worker buyuk bir checkpoint yaziyor veya kilitli kaldi.")
+                errors          = @()
+                backupDirectory = ""
+                batchStatus     = "PENDING"
+                cancelRequested = $false
+                options         = @{}
+                rules           = @()
+                logs            = @()
+                scannedFiles    = @()
+                detectedIPs     = @()
+                resultData      = $null
+                auditLogPath    = Get-AuditLogFilePath -OperationId $OperationId
+            }
+        }
         if (-not $global:OperationsRegistry.ContainsKey($OperationId)) { return $null }
         $src = $global:OperationsRegistry[$OperationId]
 
@@ -468,10 +606,13 @@ function Get-OperationSnapshot ([string]$OperationId) {
             scannedFiles    = if ($src.scannedFiles) { @($src.scannedFiles) } else { @() }
             detectedIPs     = if ($src.detectedIPs) { @($src.detectedIPs) } else { @() }
             resultData      = Protect-SensitiveData $src.resultData
+            auditLogPath    = if ($src.auditLogPath) { "$($src.auditLogPath)" } else { Get-AuditLogFilePath -OperationId $OperationId }
         }
         return $snapshot
     } finally {
-        [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+        if ($lockTaken) {
+            [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
+        }
     }
 }
 
@@ -498,6 +639,7 @@ function Append-OperationScannedFile {
             }
             $op["detectedIPs"] = $ipList
         }
+        Write-RawAuditLogLine -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_RESULT_APPENDED" -Stage "File Result" -File "$($FileDetail.filePath)" -Message "Scanned file result appended" -Data @{ fileName = "$($FileDetail.fileName)"; status = "$($FileDetail.status)"; foundIpCount = @($FileDetail.foundIPs).Count }
     } finally {
         [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
     }
@@ -752,46 +894,10 @@ function Write-AuditLogEvent {
     )
 
     if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
-        $LogDirectory = Join-Path (Get-Location) "logs"
+        $LogDirectory = if (-not [string]::IsNullOrWhiteSpace($global:AuditLogDirectory)) { $global:AuditLogDirectory } else { Join-Path (Get-Location) "logs" }
     }
 
-    $monthDir = Join-Path $LogDirectory (Get-Date).ToUniversalTime().ToString("yyyy-MM")
-    if (-not (Test-Path $monthDir)) {
-        New-Item -ItemType Directory -Path $monthDir -Force | Out-Null
-    }
-
-    $logFilePath = Join-Path $monthDir "$OperationId.jsonl"
-
-    $logEntry = @{
-        timestamp   = (Get-Date).ToUniversalTime().ToString("o")
-        operationId = $OperationId
-        level       = $Level.ToUpper()
-        event       = $EventName.ToUpper()
-        file        = $File
-        stage       = $Stage
-        message     = (Protect-SensitiveData $Message)
-        data        = (Protect-SensitiveData $Data)
-    }
-
-    $jsonLine = $logEntry | ConvertTo-Json -Depth 5 -Compress
-
-    [System.Threading.Monitor]::Enter($global:AuditLogLock)
-    try {
-        try {
-            $writer = [System.IO.File]::AppendText($logFilePath)
-            try {
-                $writer.WriteLine($jsonLine)
-                $writer.Flush()
-            } finally {
-                $writer.Close()
-                $writer.Dispose()
-            }
-        } catch {
-            # Audit log writing failure must never crash the operational worker
-        }
-    } finally {
-        [System.Threading.Monitor]::Exit($global:AuditLogLock)
-    }
+    Write-RawAuditLogLine -OperationId $OperationId -Level $Level -EventName $EventName -File $File -Stage $Stage -Message $Message -Data $Data -LogDirectory $LogDirectory
 }
 
 # ------------------------------------------------------------------------------
@@ -912,6 +1018,8 @@ function Start-AsyncOperationWorker {
         $ErrorActionPreference = "Stop"
         $result = $null
         try {
+            Set-Location -LiteralPath $repoRoot
+
             # 1. Explicitly bootstrap dependencies in the new STA runspace (Rule 2)
             if (Test-Path $mgrScript) { . $mgrScript }
             if (Test-Path $engineScript) { . $engineScript }
@@ -941,16 +1049,20 @@ function Start-AsyncOperationWorker {
             }
             switch ($type) {
                 "UPDATE" {
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "WORKER_DISPATCH" -Stage "UPDATE" -Message "Dispatching update operation" -Data @{ directory = $dir }
                     $result = Update-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
                 }
                 "PREVIEW" {
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "WORKER_DISPATCH" -Stage "PREVIEW" -Message "Dispatching preview operation" -Data @{ directory = $dir }
                     $result = Preview-ExcelDirectory -DirectoryPath $dir -Rules $rules -Options $options -OperationId $opId
                 }
                 "SCAN" {
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "WORKER_DISPATCH" -Stage "SCAN" -Message "Dispatching scan operation" -Data @{ directory = $dir }
                     $result = Scan-ExcelDirectory -DirectoryPath $dir -OperationId $opId
                 }
                 "RESTORE" {
                     $backupDir = if ($options -and $options.backupDir) { $options.backupDir } else { "" }
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "WORKER_DISPATCH" -Stage "RESTORE" -Message "Dispatching restore operation" -Data @{ directory = $dir; backupDirectory = $backupDir }
                     $result = Restore-VerifiedBackup -BackupDirectory $backupDir -TargetDirectory $dir -OperationId $opId
                 }
                 default {
@@ -963,7 +1075,15 @@ function Start-AsyncOperationWorker {
             if ($global:TERMINAL_OPERATION_STATES -notcontains $currentOp.status) {
                 if ($result.success -or $result.Success) {
                     Set-OperationStatus $opId "COMPLETED" "Done" | Out-Null
-                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_COMPLETED" -Message "Operation finished successfully" -Data @{ result = $result }
+                    $resultSummary = @{
+                        success = $true
+                        totalFiles = if ($result.totalFiles) { $result.totalFiles } else { $result.totalFilesProcessed }
+                        updatedFilesCount = $result.updatedFilesCount
+                        prospectiveUpdatedFilesCount = $result.prospectiveUpdatedFilesCount
+                        totalProspectiveReplacements = $result.totalProspectiveReplacements
+                        detectedIpCount = if ($result.detectedIPs) { @($result.detectedIPs).Count } else { 0 }
+                    }
+                    Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_COMPLETED" -Message "Operation finished successfully" -Data $resultSummary
                 } elseif ($result.batchStatus -eq "CANCELLED") {
                     Set-OperationStatus $opId "CANCELLED" "Cancelled by user" | Out-Null
                     Write-AuditLogEvent -OperationId $opId -Level "WARNING" -EventName "OPERATION_CANCELLED" -Message "Operation cancelled by user"
@@ -1028,7 +1148,20 @@ function Start-AsyncOperationWorker {
         } catch { }
     }
 
-    $inputCol = [System.Management.Automation.PSDataCollection[psobject]]::new()
-    $null = $ps.BeginInvoke($inputCol, $null, $callback, $asyncState)
-    return $true
+    try {
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "WORKER_BEGIN_INVOKE" -Message "Starting asynchronous worker runspace" -Data @{ repoRoot = $RepoRoot }
+        $inputCol = [System.Management.Automation.PSDataCollection[psobject]]::new()
+        $null = $ps.BeginInvoke($inputCol, $null, $callback, $asyncState)
+        return $true
+    } catch {
+        try {
+            Set-OperationStatus $OperationId "FAILED" "Worker start failed" | Out-Null
+            Add-OperationError $OperationId "Arka plan worker baslatilamadi: $_"
+            Write-AuditLogEvent -OperationId $OperationId -Level "ERROR" -EventName "WORKER_BEGIN_INVOKE_FAILED" -Message "$_"
+            Save-OperationHistory -OperationSummary (Get-OperationSnapshot $OperationId) -RepoRoot $RepoRoot | Out-Null
+        } catch { }
+        try { $ps.Dispose() } catch { }
+        try { Close-StaRunspace $sta } catch { }
+        return $false
+    }
 }
