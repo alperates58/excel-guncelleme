@@ -206,6 +206,69 @@ function Copy-FileWithShare ($srcPath, $dstPath) {
     }
 }
 
+function Get-ComTextProperty {
+    param(
+        [Parameter(Mandatory=$true)]$ComObject,
+        [Parameter(Mandatory=$true)][string[]]$PropertyNames
+    )
+
+    foreach ($propName in $PropertyNames) {
+        try {
+            $value = $ComObject.$propName
+            if ($null -ne $value) {
+                $text = if ($value -is [System.Array]) { ($value -join "`n") } else { "$value" }
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    return @{ Success = $true; PropertyName = $propName; Value = $text }
+                }
+            }
+        } catch { }
+    }
+
+    return @{ Success = $false; PropertyName = ""; Value = "" }
+}
+
+function Set-ComTextProperty {
+    param(
+        [Parameter(Mandatory=$true)]$ComObject,
+        [Parameter(Mandatory=$true)][string[]]$PropertyNames,
+        [Parameter(Mandatory=$true)][string]$Value,
+        [string]$PreferredProperty = ""
+    )
+
+    $orderedProps = @()
+    if (-not [string]::IsNullOrWhiteSpace($PreferredProperty)) {
+        $orderedProps += $PreferredProperty
+    }
+    foreach ($propName in $PropertyNames) {
+        if ($orderedProps -notcontains $propName) {
+            $orderedProps += $propName
+        }
+    }
+
+    $lastError = ""
+    foreach ($propName in $orderedProps) {
+        try {
+            $ComObject.$propName = $Value
+            return @{ Success = $true; PropertyName = $propName; Error = "" }
+        } catch {
+            $lastError = "$_"
+        }
+    }
+
+    return @{ Success = $false; PropertyName = ""; Error = $lastError }
+}
+
+function Get-ExcelConnectionText ($ConnectionObject) {
+    # Excel WorkbookConnection.OLEDBConnection / ODBCConnection stores the live
+    # connection string in .Connection. Some COM wrappers also expose
+    # .ConnectionString, so read both for compatibility.
+    return Get-ComTextProperty -ComObject $ConnectionObject -PropertyNames @("Connection", "ConnectionString")
+}
+
+function Set-ExcelConnectionText ($ConnectionObject, [string]$ConnectionText, [string]$PreferredProperty = "") {
+    return Set-ComTextProperty -ComObject $ConnectionObject -PropertyNames @("Connection", "ConnectionString") -Value $ConnectionText -PreferredProperty $PreferredProperty
+}
+
 function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
     if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
         Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_STARTED" -Stage "Preflight" -Message "Excel directory scan requested" -Data @{ directory = $DirectoryPath }
@@ -346,10 +409,12 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                     $cmdText = ""
                     try {
                         if ($conn.OLEDBConnection) {
-                            $connStr = $conn.OLEDBConnection.ConnectionString
+                            $connText = Get-ExcelConnectionText -ConnectionObject $conn.OLEDBConnection
+                            $connStr = $connText.Value
                             $cmdText = $conn.OLEDBConnection.CommandText
                         } elseif ($conn.ODBCConnection) {
-                            $connStr = $conn.ODBCConnection.ConnectionString
+                            $connText = Get-ExcelConnectionText -ConnectionObject $conn.ODBCConnection
+                            $connStr = $connText.Value
                             $cmdText = $conn.ODBCConnection.CommandText
                         }
                     } catch { }
@@ -913,12 +978,6 @@ function Compare-WorkbookSnapshot ($PreSnapshot, $PostSnapshot) {
     # 4. Connection count and names (MUST BE IMMUTABLE)
     if ($PreSnapshot.ConnectionsCount -ne $PostSnapshot.ConnectionsCount) {
         $diffs += "Bağlantı sayısı değişti: Eski $($PreSnapshot.ConnectionsCount), Yeni $($PostSnapshot.ConnectionsCount)"
-    } else {
-        for ($i = 0; $i -lt $PreSnapshot.ConnectionsCount; $i++) {
-            if ($PreSnapshot.ConnectionNames[$i] -ne $PostSnapshot.ConnectionNames[$i]) {
-                $diffs += "Bağlantı adı değişti: '$($PreSnapshot.ConnectionNames[$i])' -> '$($PostSnapshot.ConnectionNames[$i])'"
-            }
-        }
     }
     if ($diffs.Count -gt 0) {
         return @{
@@ -1584,25 +1643,59 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
                     try {
                         if ($wb.Connections) {
                             foreach ($conn in $wb.Connections) {
-                                # NOTE: Connection name is NOT modified (preserved immutable)
+                                try {
+                                    $connNameRep = Invoke-SafeReplacement -InputText "$($conn.Name)" -Rules $validRules
+                                    if ($connNameRep.MatchCount -gt 0) {
+                                        $conn.Name = $connNameRep.ResultText
+                                        $fileModified = $true
+                                        $fileLog.changesMade += $connNameRep.MatchCount
+                                        $totalReplacements += $connNameRep.MatchCount
+                                        $fileLog.details += "Connection name: replaced $($connNameRep.MatchCount) occurrence(s)"
+                                    }
+                                } catch {
+                                    $fileLog.details += "Connection name warning: $_"
+                                }
+
+                                try {
+                                    $connDesc = "$($conn.Description)"
+                                    if (-not [string]::IsNullOrWhiteSpace($connDesc)) {
+                                        $descRep = Invoke-SafeReplacement -InputText $connDesc -Rules $validRules
+                                        if ($descRep.MatchCount -gt 0) {
+                                            $conn.Description = $descRep.ResultText
+                                            $fileModified = $true
+                                            $fileLog.changesMade += $descRep.MatchCount
+                                            $totalReplacements += $descRep.MatchCount
+                                            $fileLog.details += "Connection description in '$($conn.Name)': replaced $($descRep.MatchCount) occurrence(s)"
+                                        }
+                                    }
+                                } catch {
+                                    $fileLog.details += "Connection description warning: $_"
+                                }
+
                                 if ($conn.OLEDBConnection) {
                                     try {
-                                        $cStr = $conn.OLEDBConnection.ConnectionString
+                                        $ole = $conn.OLEDBConnection
+                                        $connText = Get-ExcelConnectionText -ConnectionObject $ole
+                                        $cStr = $connText.Value
                                         if ($cStr) {
                                             $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
                                             if ($rep.MatchCount -gt 0) {
-                                                $conn.OLEDBConnection.ConnectionString = $rep.ResultText
-                                                $fileModified = $true
-                                                $fileLog.changesMade += $rep.MatchCount
-                                                $totalReplacements += $rep.MatchCount
-                                                $fileLog.details += "OLEDB ConnStr in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                                $setRes = Set-ExcelConnectionText -ConnectionObject $ole -ConnectionText $rep.ResultText -PreferredProperty $connText.PropertyName
+                                                if ($setRes.Success) {
+                                                    $fileModified = $true
+                                                    $fileLog.changesMade += $rep.MatchCount
+                                                    $totalReplacements += $rep.MatchCount
+                                                    $fileLog.details += "OLEDB $($setRes.PropertyName) in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                                } else {
+                                                    $fileLog.details += "OLEDB connection warning in '$($conn.Name)': could not write connection text ($($setRes.Error))"
+                                                }
                                             }
                                         }
-                                        $cmd = $conn.OLEDBConnection.CommandText
+                                        $cmd = $ole.CommandText
                                         if ($cmd) {
                                             $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
                                             if ($rep.MatchCount -gt 0) {
-                                                $conn.OLEDBConnection.CommandText = $rep.ResultText
+                                                $ole.CommandText = $rep.ResultText
                                                 $fileModified = $true
                                                 $fileLog.changesMade += $rep.MatchCount
                                                 $totalReplacements += $rep.MatchCount
@@ -1614,22 +1707,28 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
 
                                 if ($conn.ODBCConnection) {
                                     try {
-                                        $cStr = $conn.ODBCConnection.ConnectionString
+                                        $odbc = $conn.ODBCConnection
+                                        $connText = Get-ExcelConnectionText -ConnectionObject $odbc
+                                        $cStr = $connText.Value
                                         if ($cStr) {
                                             $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
                                             if ($rep.MatchCount -gt 0) {
-                                                $conn.ODBCConnection.ConnectionString = $rep.ResultText
-                                                $fileModified = $true
-                                                $fileLog.changesMade += $rep.MatchCount
-                                                $totalReplacements += $rep.MatchCount
-                                                $fileLog.details += "ODBC ConnStr in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                                $setRes = Set-ExcelConnectionText -ConnectionObject $odbc -ConnectionText $rep.ResultText -PreferredProperty $connText.PropertyName
+                                                if ($setRes.Success) {
+                                                    $fileModified = $true
+                                                    $fileLog.changesMade += $rep.MatchCount
+                                                    $totalReplacements += $rep.MatchCount
+                                                    $fileLog.details += "ODBC $($setRes.PropertyName) in '$($conn.Name)': replaced $($rep.MatchCount) occurrence(s)"
+                                                } else {
+                                                    $fileLog.details += "ODBC connection warning in '$($conn.Name)': could not write connection text ($($setRes.Error))"
+                                                }
                                             }
                                         }
-                                        $cmd = $conn.ODBCConnection.CommandText
+                                        $cmd = $odbc.CommandText
                                         if ($cmd) {
                                             $rep = Invoke-SafeReplacement -InputText $cmd -Rules $validRules
                                             if ($rep.MatchCount -gt 0) {
-                                                $conn.ODBCConnection.CommandText = $rep.ResultText
+                                                $odbc.CommandText = $rep.ResultText
                                                 $fileModified = $true
                                                 $fileLog.changesMade += $rep.MatchCount
                                                 $totalReplacements += $rep.MatchCount
@@ -2025,15 +2124,37 @@ function Preview-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string
                             for ($cIdx = 1; $cIdx -le $cCount; $cIdx++) {
                                 $conn = $conns.Item($cIdx)
                                 if ($conn) {
+                                    try {
+                                        $connNameRep = Invoke-SafeReplacement -InputText "$($conn.Name)" -Rules $validRules
+                                        if ($connNameRep.MatchCount -gt 0) {
+                                            $fPreview.connectionMatches += $connNameRep.MatchCount
+                                            $fPreview.totalReplacements += $connNameRep.MatchCount
+                                            $fPreview.details += "Connection name '$($conn.Name)': $($connNameRep.MatchCount) eşleşme"
+                                        }
+                                    } catch { }
+
+                                    try {
+                                        $connDesc = "$($conn.Description)"
+                                        if (-not [string]::IsNullOrWhiteSpace($connDesc)) {
+                                            $descRep = Invoke-SafeReplacement -InputText $connDesc -Rules $validRules
+                                            if ($descRep.MatchCount -gt 0) {
+                                                $fPreview.connectionMatches += $descRep.MatchCount
+                                                $fPreview.totalReplacements += $descRep.MatchCount
+                                                $fPreview.details += "Connection description in '$($conn.Name)': $($descRep.MatchCount) eşleşme"
+                                            }
+                                        }
+                                    } catch { }
+
                                     if ($conn.OLEDBConnection) {
                                         try {
-                                            $cStr = $conn.OLEDBConnection.ConnectionString
+                                            $connText = Get-ExcelConnectionText -ConnectionObject $conn.OLEDBConnection
+                                            $cStr = $connText.Value
                                             if ($cStr) {
                                                 $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
                                                 if ($rep.MatchCount -gt 0) {
                                                     $fPreview.connectionMatches += $rep.MatchCount
                                                     $fPreview.totalReplacements += $rep.MatchCount
-                                                    $fPreview.details += "OLEDB ConnStr in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                    $fPreview.details += "OLEDB $($connText.PropertyName) in '$($conn.Name)': $($rep.MatchCount) eşleşme"
                                                 }
                                             }
                                             $cmd = $conn.OLEDBConnection.CommandText
@@ -2049,13 +2170,14 @@ function Preview-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string
                                     }
                                     if ($conn.ODBCConnection) {
                                         try {
-                                            $cStr = $conn.ODBCConnection.ConnectionString
+                                            $connText = Get-ExcelConnectionText -ConnectionObject $conn.ODBCConnection
+                                            $cStr = $connText.Value
                                             if ($cStr) {
                                                 $rep = Invoke-SafeReplacement -InputText $cStr -Rules $validRules
                                                 if ($rep.MatchCount -gt 0) {
                                                     $fPreview.connectionMatches += $rep.MatchCount
                                                     $fPreview.totalReplacements += $rep.MatchCount
-                                                    $fPreview.details += "ODBC ConnStr in '$($conn.Name)': $($rep.MatchCount) eşleşme"
+                                                    $fPreview.details += "ODBC $($connText.PropertyName) in '$($conn.Name)': $($rep.MatchCount) eşleşme"
                                                 }
                                             }
                                             $cmd = $conn.ODBCConnection.CommandText
