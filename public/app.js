@@ -29,6 +29,52 @@ function ensureArray(val) {
     return [];
 }
 
+function ensureStringArray(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val.map(v => String(v)).filter(Boolean);
+    if (typeof val === 'string') return val.split(',').map(v => v.trim()).filter(Boolean);
+    return [];
+}
+
+function isIPv4Like(text) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(String(text || '').trim());
+}
+
+function getUpdateCandidateScope(rules) {
+    const files = currentScanData && Array.isArray(currentScanData.files) ? currentScanData.files : null;
+    if (!files || files.length === 0) return null;
+
+    const oldTexts = rules.map(r => String(r.oldText || '').trim()).filter(Boolean);
+    if (oldTexts.length === 0) return null;
+
+    const canFilterByDetectedIps = oldTexts.every(isIPv4Like);
+    let hasPreviewSignals = false;
+
+    const candidates = files.filter(file => {
+        const replacementCount = Number(file.totalReplacements || file.prospectiveReplacements || 0);
+        if (replacementCount > 0 || file.status === 'Would Update') {
+            hasPreviewSignals = true;
+            return true;
+        }
+
+        if (!canFilterByDetectedIps) return false;
+
+        const found = ensureStringArray(file.foundIPs).map(ip => ip.trim().toLowerCase());
+        return oldTexts.some(oldText => found.includes(oldText.toLowerCase()));
+    });
+
+    if (!hasPreviewSignals && !canFilterByDetectedIps) return null;
+
+    return {
+        enabled: true,
+        totalScanned: files.length,
+        files: candidates.map(file => ({
+            fileName: file.fileName || '',
+            filePath: file.filePath || ''
+        }))
+    };
+}
+
 // DOM Elements - Navigation & Status
 const serverStatus = document.getElementById('serverStatus');
 const navTabs = document.querySelectorAll('.nav-tab');
@@ -458,6 +504,8 @@ function handleOperationFinished(op) {
                         appendLog(`✔ Güncellendi: ${l.fileName} (${l.changesMade} değişiklik)`, 'success');
                     } else if (l.status === 'No Changes') {
                         appendLog(`- Değişiklik Yok: ${l.fileName}`, 'info');
+                    } else if (l.status === 'No Candidates') {
+                        appendLog(`- Güncellenecek aday dosya yok.`, 'info');
                     }
                 });
             }
@@ -595,8 +643,14 @@ function openConfirmationModal() {
         return;
     }
 
+    const candidateScope = getUpdateCandidateScope(rules);
+
     confirmTargetDir.textContent = dir;
-    confirmFileCount.textContent = (currentScanData && currentScanData.files) ? currentScanData.files.length : 'Belirtilmemiş';
+    if (candidateScope) {
+        confirmFileCount.textContent = `${candidateScope.files.length} aday / ${candidateScope.totalScanned} listelenen`;
+    } else {
+        confirmFileCount.textContent = (currentScanData && currentScanData.files) ? currentScanData.files.length : 'Belirtilmemiş';
+    }
 
     confirmRulesList.innerHTML = '';
     rules.forEach(r => {
@@ -619,6 +673,7 @@ async function executeConfirmedUpdate() {
 
     const dir = folderPathInput.value.trim();
     const rules = getRules();
+    const candidateScope = getUpdateCandidateScope(rules);
 
     btnExecuteUpdate.disabled = true;
     btnExecuteUpdate.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Başlatılıyor...`;
@@ -631,6 +686,11 @@ async function executeConfirmedUpdate() {
         autoBackup: chkAutoBackup.checked,
         atomicBatch: chkAtomicBatch ? (chkAtomicBatch.checked && chkAutoBackup.checked) : false
     };
+    if (candidateScope) {
+        options.candidateFiles = candidateScope.files;
+        options.candidateFilterTotalFiles = candidateScope.totalScanned;
+        appendLog(`Aday dosya filtresi aktif: ${candidateScope.files.length} / ${candidateScope.totalScanned} dosya güncelleme kuyruğuna alınacak.`, 'info');
+    }
 
     try {
         const res = await fetch(`${API_BASE}/update`, {

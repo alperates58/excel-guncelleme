@@ -1438,6 +1438,60 @@ function Restore-BatchBackup {
     }
 }
 
+function Get-ObjectPropertyValue ($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Name)) {
+        return $Object[$Name]
+    }
+
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($prop) { return $prop.Value }
+    return $null
+}
+
+function Get-CandidateFileSelectors ($Options) {
+    $candidateFiles = Get-ObjectPropertyValue $Options "candidateFiles"
+    if ($null -eq $candidateFiles) {
+        return @{
+            Enabled = $false
+            PathSet = @{}
+            NameSet = @{}
+            SelectorCount = 0
+        }
+    }
+
+    $pathSet = @{}
+    $nameSet = @{}
+
+    foreach ($candidate in @($candidateFiles)) {
+        if ($null -eq $candidate) { continue }
+
+        $filePath = $null
+        $fileName = $null
+
+        if ($candidate -is [string]) {
+            $fileName = $candidate
+        } else {
+            $filePath = Get-ObjectPropertyValue $candidate "filePath"
+            $fileName = Get-ObjectPropertyValue $candidate "fileName"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($filePath)) {
+            $pathSet[$filePath.Trim().ToLowerInvariant()] = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($fileName)) {
+            $nameSet[$fileName.Trim().ToLowerInvariant()] = $true
+        }
+    }
+
+    return @{
+        Enabled = $true
+        PathSet = $pathSet
+        NameSet = $nameSet
+        SelectorCount = ($pathSet.Count + $nameSet.Count)
+    }
+}
+
 function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]$OperationId = "") {
     $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
     if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
@@ -1448,6 +1502,7 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
     }
 
     $files = Get-ExcelFiles $DirectoryPath
+    $listedFileCount = $files.Count
     $updateLog = @()
     $updatedFilesCount = 0
     $totalReplacements = 0
@@ -1461,7 +1516,7 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
         Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "UPDATE_FILES_ENUMERATED" -Stage "Preflight" -Message "Excel files enumerated for update" -Data @{ directory = $DirectoryPath; totalFiles = $totalCount }
     }
 
-    if ($totalCount -eq 0) {
+    if ($listedFileCount -eq 0) {
         Set-ProgressState $false "update" 0 0 ""
         return @{ success = $false; error = "No Excel files found to update." }
     }
@@ -1473,6 +1528,57 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
         return @{ success = $false; error = "Rule validation failed: $($ruleValidation.Errors -join '; ')" }
     }
     $validRules = $ruleValidation.Rules
+
+    $candidateFilter = Get-CandidateFileSelectors -Options $Options
+    if ($candidateFilter.Enabled) {
+        $files = @($files | Where-Object {
+            $fullNameKey = $_.FullName.ToLowerInvariant()
+            $nameKey = $_.Name.ToLowerInvariant()
+            $candidateFilter.PathSet.ContainsKey($fullNameKey) -or $candidateFilter.NameSet.ContainsKey($nameKey)
+        })
+        $totalCount = $files.Count
+
+        if ($opId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "UPDATE_CANDIDATE_FILTER_APPLIED" -Stage "Preflight" -Message "Update candidate file filter applied" -Data @{
+                listedFiles = $listedFileCount
+                candidateSelectors = $candidateFilter.SelectorCount
+                candidateFiles = $totalCount
+            }
+        }
+
+        if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+            $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Aday dosyalar belirlendi" -CurrentStage "Preflight" -ProgressPercent 2
+        }
+
+        if ($totalCount -eq 0) {
+            $updateLog += @{
+                fileName = "[SYSTEM]"
+                filePath = ""
+                status = "No Candidates"
+                changesMade = 0
+                details = @("Tarama sonucuna göre eski değer içeren dosya bulunmadı; güncelleme yapılmadı.")
+                initialHash = ""
+                finalHash = ""
+            }
+            Set-ProgressState $false "update" 0 0 "Güncellenecek aday dosya yok."
+            return @{
+                success = $true
+                batchStatus = "NO_CHANGES"
+                directory = $DirectoryPath
+                totalFilesProcessed = 0
+                updatedFilesCount = 0
+                totalReplacements = 0
+                logs = $updateLog
+                backupDirectory = $null
+                candidateFilter = @{
+                    enabled = $true
+                    listedFiles = $listedFileCount
+                    candidateFiles = 0
+                }
+            }
+        }
+    }
+
     if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
         $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Kurallar doğrulandı" -CurrentStage "Preflight" -ProgressPercent 2
     }
@@ -2008,6 +2114,19 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
         totalReplacements = $totalReplacements
         logs = $updateLog
         backupDirectory = $backupDir
+        candidateFilter = if ($candidateFilter.Enabled) {
+            @{
+                enabled = $true
+                listedFiles = $listedFileCount
+                candidateFiles = $totalCount
+            }
+        } else {
+            @{
+                enabled = $false
+                listedFiles = $listedFileCount
+                candidateFiles = $listedFileCount
+            }
+        }
     }
 }
 
