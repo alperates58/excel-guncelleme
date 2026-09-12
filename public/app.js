@@ -362,6 +362,10 @@ function startOperationPolling(operationId, operationType) {
             const data = await res.json();
             const op = data.operation;
             if (!op) return;
+            if (op.auditLogPath && op.auditLogPath !== currentOperationLogPath) {
+                currentOperationLogPath = op.auditLogPath;
+                appendLog(`Operasyon log dosyası: ${currentOperationLogPath}`, 'info');
+            }
 
             updateProgressDisplay(op);
 
@@ -539,6 +543,10 @@ async function runPreview() {
 
         if (res.status === 202 && data.success) {
             appendLog(`Önizleme işlemi kuyruğa alındı (ID: ${data.operationId}).`, 'info');
+            currentOperationLogPath = data.auditLogPath || '';
+            if (currentOperationLogPath) {
+                appendLog(`Operasyon log dosyası: ${currentOperationLogPath}`, 'info');
+            }
             startOperationPolling(data.operationId, 'PREVIEW');
         } else if (res.status === 409) {
             alert(`Başka bir işlem şu anda çalışıyor (ID: ${data.activeOperationId}). Lütfen bitmesini veya iptal edilmesini bekleyin.`);
@@ -619,6 +627,10 @@ async function executeConfirmedUpdate() {
 
         if (res.status === 202 && data.success) {
             appendLog(`Güncelleme işlemi kuyruğa alındı (ID: ${data.operationId}).`, 'info');
+            currentOperationLogPath = data.auditLogPath || '';
+            if (currentOperationLogPath) {
+                appendLog(`Operasyon log dosyası: ${currentOperationLogPath}`, 'info');
+            }
             startOperationPolling(data.operationId, 'UPDATE');
         } else if (res.status === 409) {
             alert(`Sistem meşgul: Şu anda başka bir işlem çalışıyor (ID: ${data.activeOperationId}).`);

@@ -960,6 +960,13 @@ function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
     }
 
     $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
+    if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles 0 -TotalFiles $files.Count -CurrentFile "Yedek hazırlanıyor" -CurrentStage "Backup" -ProgressPercent 3
+    }
+    if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "BACKUP_STARTED" -Stage "Backup" -Message "Backup preparation started" -Data @{ directory = $DirectoryPath; totalFiles = $files.Count }
+    }
+
     $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
     
     # Store backup adjacent to selected directory: <DirectoryPath>_ExcelUpdater_Backups_<opId>
@@ -986,6 +993,10 @@ function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
         $verifiedBackups = @()
 
         foreach ($file in $files) {
+            if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+                $backupPct = [math]::Min(9, [math]::Max(3, [math]::Floor(3 + (($backedUpCount / [double]$files.Count) * 6))))
+                $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $backedUpCount -TotalFiles $files.Count -CurrentFile "Yedekleniyor: $($file.Name)" -CurrentStage "Backup" -ProgressPercent $backupPct
+            }
             $bRes = New-VerifiedBackup -SourcePath $file.FullName -BackupDir $backupDir
             if (-not $bRes.Success) {
                 # Clean up corrupted/partial backup directory
@@ -998,6 +1009,13 @@ function Create-ExcelBackup ($DirectoryPath, $OperationId = "") {
                 Sha256 = $bRes.Sha256
             }
             $backedUpCount++
+        }
+
+        if ($OperationId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+            $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $files.Count -TotalFiles $files.Count -CurrentFile "Yedekleme tamamlandı" -CurrentStage "Backup Completed" -ProgressPercent 9
+        }
+        if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "BACKUP_COMPLETED" -Stage "Backup" -Message "Backup preparation completed" -Data @{ directory = $DirectoryPath; totalFiles = $backedUpCount; backupDirectory = $backupDir }
         }
 
         # Write cryptographic backup manifest for integrity verification on restore
@@ -1363,6 +1381,13 @@ function Restore-BatchBackup {
 
 function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]$OperationId = "") {
     $opId = if (-not [string]::IsNullOrWhiteSpace($OperationId)) { $OperationId } else { New-OperationId }
+    if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles 0 -CurrentFile "Dosyalar listeleniyor" -CurrentStage "Preflight" -ProgressPercent 1
+    }
+    if ($opId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "UPDATE_PREFLIGHT_STARTED" -Stage "Preflight" -Message "Update preflight started" -Data @{ directory = $DirectoryPath }
+    }
+
     $files = Get-ExcelFiles $DirectoryPath
     $updateLog = @()
     $updatedFilesCount = 0
@@ -1370,6 +1395,12 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
     $totalCount = $files.Count
 
     Set-ProgressState $true "update" 0 $totalCount "Güncellemeye Başlanıyor..."
+    if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Ön kontrol hazırlanıyor" -CurrentStage "Preflight" -ProgressPercent 1
+    }
+    if ($opId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "UPDATE_FILES_ENUMERATED" -Stage "Preflight" -Message "Excel files enumerated for update" -Data @{ directory = $DirectoryPath; totalFiles = $totalCount }
+    }
 
     if ($totalCount -eq 0) {
         Set-ProgressState $false "update" 0 0 ""
@@ -1383,9 +1414,17 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
         return @{ success = $false; error = "Rule validation failed: $($ruleValidation.Errors -join '; ')" }
     }
     $validRules = $ruleValidation.Rules
+    if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Kurallar doğrulandı" -CurrentStage "Preflight" -ProgressPercent 2
+    }
 
     # Pre-flight check: ensure all files are writable before doing anything
+    $preflightCount = 0
     foreach ($f in $files) {
+        if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+            $preflightPct = [math]::Min(3, [math]::Max(2, [math]::Floor(2 + (($preflightCount / [double]$totalCount) * 1))))
+            $null = Update-OperationProgress -OperationId $opId -ProcessedFiles $preflightCount -TotalFiles $totalCount -CurrentFile "Kilit kontrolü: $($f.Name)" -CurrentStage "Preflight" -ProgressPercent $preflightPct
+        }
         if (-not (Test-FileWritable $f.FullName)) {
             Set-ProgressState $false "update" 0 0 ""
             return @{
@@ -1393,6 +1432,13 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
                 error = "File is locked or read-only: $($f.Name). Update aborted before making any changes."
             }
         }
+        $preflightCount++
+    }
+    if ($opId -and (Get-Command "Update-OperationProgress" -ErrorAction SilentlyContinue)) {
+        $null = Update-OperationProgress -OperationId $opId -ProcessedFiles 0 -TotalFiles $totalCount -CurrentFile "Ön kontrol tamamlandı" -CurrentStage "Preflight Completed" -ProgressPercent 3
+    }
+    if ($opId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+        Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "UPDATE_PREFLIGHT_COMPLETED" -Stage "Preflight" -Message "Update preflight completed" -Data @{ totalFiles = $totalCount }
     }
 
     # Cancellation Checkpoint 1 (After Preflight)
@@ -1417,7 +1463,7 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
     $atomicBatch = if ($Options -and $Options.atomicBatch -ne $null) { $Options.atomicBatch } else { $true }
 
     if ($autoBackupRequested -or $atomicBatch) {
-        $backupRes = Create-ExcelBackup -DirectoryPath $DirectoryPath
+        $backupRes = Create-ExcelBackup -DirectoryPath $DirectoryPath -OperationId $opId
         if (-not $backupRes.success) {
             Set-ProgressState $false "update" 0 0 ""
             return @{ success = $false; error = "Auto-backup failed prior to update: $($backupRes.error)" }
