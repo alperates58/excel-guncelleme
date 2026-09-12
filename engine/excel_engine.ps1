@@ -1519,9 +1519,25 @@ function Update-ExcelDirectory ($DirectoryPath, $Rules, $Options = @{}, [string]
     # Backup handling:
     $backupDir = $null
     $autoBackupRequested = if ($Options -and $Options.autoBackup -ne $null) { $Options.autoBackup } else { $true }
-    $atomicBatch = if ($Options -and $Options.atomicBatch -ne $null) { $Options.atomicBatch } else { $true }
+    $atomicBatchRequested = if ($Options -and $Options.atomicBatch -ne $null) { $Options.atomicBatch } else { $true }
+    $atomicBatch = ($atomicBatchRequested -and $autoBackupRequested)
 
-    if ($autoBackupRequested -or $atomicBatch) {
+    if ($atomicBatchRequested -and -not $autoBackupRequested) {
+        if ($opId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
+            Write-AuditLogEvent -OperationId $opId -Level "WARNING" -EventName "ROLLBACK_DISABLED_NO_BACKUP" -Stage "Preflight" -Message "Rollback mode was requested but automatic backup is disabled; proceeding without batch rollback." -Data @{ autoBackup = $autoBackupRequested; atomicBatchRequested = $atomicBatchRequested }
+        }
+        $updateLog += @{
+            fileName = "[SYSTEM]"
+            filePath = ""
+            status = "Warning"
+            changesMade = 0
+            details = @("Güvenli işlem modu yedek gerektirir. Otomatik yedek kapalı olduğu için batch rollback devre dışı bırakıldı.")
+            initialHash = ""
+            finalHash = ""
+        }
+    }
+
+    if ($autoBackupRequested) {
         $backupRes = Create-ExcelBackup -DirectoryPath $DirectoryPath -OperationId $opId
         if (-not $backupRes.success) {
             Set-ProgressState $false "update" 0 0 ""

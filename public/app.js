@@ -227,6 +227,21 @@ function bindEvents() {
     btnAddRule.addEventListener('click', () => addRuleRow());
     btnClearLog.addEventListener('click', () => { logConsole.innerHTML = ''; });
 
+    if (chkAutoBackup && chkAtomicBatch) {
+        chkAutoBackup.addEventListener('change', () => {
+            if (!chkAutoBackup.checked && chkAtomicBatch.checked) {
+                chkAtomicBatch.checked = false;
+                appendLog('Otomatik yedek kapatıldığı için güvenli rollback modu da kapatıldı.', 'warning');
+            }
+        });
+        chkAtomicBatch.addEventListener('change', () => {
+            if (chkAtomicBatch.checked && !chkAutoBackup.checked) {
+                chkAutoBackup.checked = true;
+                appendLog('Güvenli rollback modu için otomatik yedek gereklidir; yedek tekrar açıldı.', 'info');
+            }
+        });
+    }
+
     // Table Search
     tableSearch.addEventListener('input', filterTable);
 
@@ -614,7 +629,7 @@ async function executeConfirmedUpdate() {
         updateConnections: chkConnections.checked,
         updateVba: chkVba.checked,
         autoBackup: chkAutoBackup.checked,
-        atomicBatch: chkAtomicBatch ? chkAtomicBatch.checked : true
+        atomicBatch: chkAtomicBatch ? (chkAtomicBatch.checked && chkAutoBackup.checked) : false
     };
 
     try {
