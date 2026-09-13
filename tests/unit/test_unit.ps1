@@ -393,5 +393,72 @@ try {
     }
 }
 
+# ------------------------------------------------------------------------------
+# 18. test_db_name_extraction
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 18] test_db_name_extraction --" -ForegroundColor Magenta
+if (Get-Command "Get-DatabaseNamesFromText" -ErrorAction SilentlyContinue) {
+    $sOle = "Provider=SQLOLEDB;Data Source=10.0.0.1;Initial Catalog=LOGO_2023;"
+    $dbsOle = Get-DatabaseNamesFromText $sOle
+    Assert-True ($dbsOle -contains "LOGO_2023") "test_db_name_extraction OLEDB Initial Catalog"
+
+    $sOdbc = "DRIVER={SQL Server};SERVER=10.0.0.1;DATABASE=MIKRO_DB;"
+    $dbsOdbc = Get-DatabaseNamesFromText $sOdbc
+    Assert-True ($dbsOdbc -contains "MIKRO_DB") "test_db_name_extraction ODBC DATABASE"
+
+    $sPq = 'let Source = Sql.Database("10.0.0.5", "ERP_PROD") in Source'
+    $dbsPq = Get-DatabaseNamesFromText $sPq
+    Assert-True ($dbsPq -contains "ERP_PROD") "test_db_name_extraction Power Query M"
+
+    $sSql = 'USE [FINANS_DB]; SELECT * FROM [STOK_DB].[dbo].[ITEMS]'
+    $dbsSql = Get-DatabaseNamesFromText $sSql
+    Assert-True ($dbsSql -contains "FINANS_DB") "test_db_name_extraction SQL USE"
+    Assert-True ($dbsSql -contains "STOK_DB") "test_db_name_extraction SQL three-part naming"
+} else {
+    Write-Host "  [SKIP] Get-DatabaseNamesFromText not yet implemented" -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------------------------
+# 19. test_db_name_safe_replacement
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 19] test_db_name_safe_replacement --" -ForegroundColor Magenta
+if (Get-Command "Invoke-SafeReplacement" -ErrorAction SilentlyContinue) {
+    $dbRules = @(
+        @{ oldText = "LOGO_2023"; newText = "LOGO_2024" }
+    )
+
+    $inConn = "Provider=SQLOLEDB;Data Source=10.0.0.1;Initial Catalog=LOGO_2023;"
+    $resConn = Invoke-SafeReplacement -InputText $inConn -Rules $dbRules
+    Assert-Equal $resConn.ResultText "Provider=SQLOLEDB;Data Source=10.0.0.1;Initial Catalog=LOGO_2024;" "test_db_name_safe_replacement in ConnectionString"
+
+    $inPq = 'Sql.Database("10.0.0.1", "LOGO_2023")'
+    $resPq = Invoke-SafeReplacement -InputText $inPq -Rules $dbRules
+    Assert-Equal $resPq.ResultText 'Sql.Database("10.0.0.1", "LOGO_2024")' "test_db_name_safe_replacement in Power Query"
+
+    $inSql = "SELECT * FROM [LOGO_2023].[dbo].[FATURA] WHERE TARIH > '2023-01-01'"
+    $resSql = Invoke-SafeReplacement -InputText $inSql -Rules $dbRules
+    Assert-Equal $resSql.ResultText "SELECT * FROM [LOGO_2024].[dbo].[FATURA] WHERE TARIH > '2023-01-01'" "test_db_name_safe_replacement inside SQL square brackets"
+} else {
+    Write-Host "  [SKIP] Invoke-SafeReplacement not yet implemented" -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------------------------
+# 20. test_db_and_ip_combined_replacement
+# ------------------------------------------------------------------------------
+Write-Host "`n-- [TEST 20] test_db_and_ip_combined_replacement --" -ForegroundColor Magenta
+if (Get-Command "Invoke-SafeReplacement" -ErrorAction SilentlyContinue) {
+    $combinedRules = @(
+        @{ oldText = "192.168.1.50"; newText = "10.0.0.1" },
+        @{ oldText = "LOGO_2023"; newText = "LOGO_2024" }
+    )
+
+    $inCombined = 'Data Source=192.168.1.50;Initial Catalog=LOGO_2023;Provider=SQLOLEDB;'
+    $resCombined = Invoke-SafeReplacement -InputText $inCombined -Rules $combinedRules
+    Assert-Equal $resCombined.ResultText 'Data Source=10.0.0.1;Initial Catalog=LOGO_2024;Provider=SQLOLEDB;' "Combined IP and DB replacement in single pass"
+    Assert-Equal $resCombined.ReplacementsCount 2 "Combined replacements count should be 2"
+} else {
+    Write-Host "  [SKIP] Invoke-SafeReplacement not yet implemented" -ForegroundColor Yellow
+}
+
 
 

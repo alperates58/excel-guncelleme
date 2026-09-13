@@ -258,6 +258,70 @@ function Set-ComTextProperty {
     return @{ Success = $false; PropertyName = ""; Error = $lastError }
 }
 
+function Get-DatabaseNamesFromText ([string]$Text) {
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    $dbs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $ignoreList = @('master', 'tempdb', 'model', 'msdb', 'sys', 'information_schema', 'dbo', 'null', 'true', 'false', 'default')
+    $opt = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+
+    # 1. Connection strings: Initial Catalog=..., Database=..., DBQ=...
+    $connMatches = [regex]::Matches($Text, '(?:Initial\s+Catalog|Database|DBQ)\s*=\s*[''"]?([-a-zA-Z0-9_\.\$]+)[''"]?', $opt)
+    foreach ($m in $connMatches) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and -not ($val -match '^(\d{1,3}\.){3}\d{1,3}$') -and -not ($val.EndsWith('.xlsx') -or $val.EndsWith('.accdb') -or $val.EndsWith('.mdb'))) {
+            if ($ignoreList -notcontains $val.ToLowerInvariant()) {
+                $dbs.Add($val) | Out-Null
+            }
+        }
+    }
+
+    # 2. Power Query M language: Sql.Database("SERVER", "DATABASE") or Sql.Databases("SERVER"){[Name="DATABASE"]}
+    $pqMatches = [regex]::Matches($Text, '(?:Sql|PostgreSQL|MySql)\.Database\s*\(\s*"[^"]+"\s*,\s*"([^"]+)"', $opt)
+    foreach ($m in $pqMatches) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and -not ($val -match '^(\d{1,3}\.){3}\d{1,3}$')) {
+            if ($ignoreList -notcontains $val.ToLowerInvariant()) {
+                $dbs.Add($val) | Out-Null
+            }
+        }
+    }
+
+    $pqNavMatches = [regex]::Matches($Text, 'Sql\.Databases\s*\([^)]*\)\s*\{\[\s*Name\s*=\s*"([^"]+)"\s*\]\}', $opt)
+    foreach ($m in $pqNavMatches) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and -not ($val -match '^(\d{1,3}\.){3}\d{1,3}$')) {
+            if ($ignoreList -notcontains $val.ToLowerInvariant()) {
+                $dbs.Add($val) | Out-Null
+            }
+        }
+    }
+
+    # 3. SQL USE statement: USE [DbName] or USE DbName
+    $useMatches = [regex]::Matches($Text, '\bUSE\s+\[?([-a-zA-Z0-9_]+)\]?', $opt)
+    foreach ($m in $useMatches) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and -not ($val -match '^(\d{1,3}\.){3}\d{1,3}$')) {
+            if ($ignoreList -notcontains $val.ToLowerInvariant()) {
+                $dbs.Add($val) | Out-Null
+            }
+        }
+    }
+
+    # 4. SQL three-part naming in queries: FROM/JOIN [DbName].[dbo].[Table]
+    $threePartMatches = [regex]::Matches($Text, '\b(?:FROM|JOIN)\s+\[?([-a-zA-Z0-9_]+)\]?\.(?:\[?dbo\]?|\[?[-a-zA-Z0-9_]+\]?)\.', $opt)
+    foreach ($m in $threePartMatches) {
+        $val = $m.Groups[1].Value.Trim()
+        if ($val -and -not ($val -match '^(\d{1,3}\.){3}\d{1,3}$')) {
+            if ($ignoreList -notcontains $val.ToLowerInvariant()) {
+                $dbs.Add($val) | Out-Null
+            }
+        }
+    }
+
+    return @($dbs)
+}
+
 function Get-ExcelConnectionText ($ConnectionObject) {
     # Excel WorkbookConnection.OLEDBConnection / ODBCConnection stores the live
     # connection string in .Connection. Some COM wrappers also expose
@@ -277,6 +341,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
     $files = Get-ExcelFiles $DirectoryPath
     $fileList = @()
     $ipSummary = @{}
+    $dbSummary = @{}
     $totalCount = $files.Count
 
     if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
@@ -303,6 +368,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
             totalFiles = 0
             files = @()
             detectedIPs = @()
+            detectedDatabases = @()
         }
     }
 
@@ -365,6 +431,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
             connections = @()
             vbaMatches = @()
             foundIPs = @()
+            foundDatabases = @()
             hasVba = $false
             status = "Scanned"
         }
@@ -381,12 +448,14 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                     $formula = $q.Formula
                     $matches = [regex]::Matches($formula, $ipRegex)
                     $ips = @($matches | ForEach-Object { $_.Value })
+                    $dbs = Get-DatabaseNamesFromText $formula
                     
                     $qInfo = @{
                         name = $q.Name
                         formulaSnippet = if ($formula.Length -gt 150) { $formula.Substring(0, 150) + "..." } else { $formula }
                         fullFormula = $formula
                         ips = $ips
+                        databases = $dbs
                     }
                     $fileDetail.queries += $qInfo
 
@@ -394,6 +463,12 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         if (-not $fileDetail.foundIPs.Contains($ip)) { $fileDetail.foundIPs += $ip }
                         if (-not $ipSummary.ContainsKey($ip)) { $ipSummary[$ip] = 0 }
                         $ipSummary[$ip]++
+                    }
+
+                    foreach ($db in $dbs) {
+                        if (-not $fileDetail.foundDatabases.Contains($db)) { $fileDetail.foundDatabases += $db }
+                        if (-not $dbSummary.ContainsKey($db)) { $dbSummary[$db] = 0 }
+                        $dbSummary[$db]++
                     }
                 }
             } catch {
@@ -422,6 +497,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                     $combinedText = "$($conn.Name) $connStr $cmdText $($conn.Description)"
                     $matches = [regex]::Matches($combinedText, $ipRegex)
                     $ips = @($matches | ForEach-Object { $_.Value })
+                    $dbs = Get-DatabaseNamesFromText "$connStr $cmdText"
 
                     $cInfo = @{
                         name = $conn.Name
@@ -429,6 +505,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         connectionString = $connStr
                         commandText = $cmdText
                         ips = $ips
+                        databases = $dbs
                     }
                     $fileDetail.connections += $cInfo
 
@@ -436,6 +513,12 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                         if (-not $fileDetail.foundIPs.Contains($ip)) { $fileDetail.foundIPs += $ip }
                         if (-not $ipSummary.ContainsKey($ip)) { $ipSummary[$ip] = 0 }
                         $ipSummary[$ip]++
+                    }
+
+                    foreach ($db in $dbs) {
+                        if (-not $fileDetail.foundDatabases.Contains($db)) { $fileDetail.foundDatabases += $db }
+                        if (-not $dbSummary.ContainsKey($db)) { $dbSummary[$db] = 0 }
+                        $dbSummary[$db]++
                     }
                 }
             } catch {
@@ -457,6 +540,12 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                                 if (-not $fileDetail.foundIPs.Contains($ip)) { $fileDetail.foundIPs += $ip }
                                 if (-not $ipSummary.ContainsKey($ip)) { $ipSummary[$ip] = 0 }
                                 $ipSummary[$ip]++
+                            }
+                            $qtDbs = Get-DatabaseNamesFromText $qtConn
+                            foreach ($db in $qtDbs) {
+                                if (-not $fileDetail.foundDatabases.Contains($db)) { $fileDetail.foundDatabases += $db }
+                                if (-not $dbSummary.ContainsKey($db)) { $dbSummary[$db] = 0 }
+                                $dbSummary[$db]++
                             }
                         }
                     }
@@ -489,6 +578,12 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
                                     $ipSummary[$ip]++
                                 }
                             }
+                            $vbaDbs = Get-DatabaseNamesFromText $code
+                            foreach ($db in $vbaDbs) {
+                                if (-not $fileDetail.foundDatabases.Contains($db)) { $fileDetail.foundDatabases += $db }
+                                if (-not $dbSummary.ContainsKey($db)) { $dbSummary[$db] = 0 }
+                                $dbSummary[$db]++
+                            }
                         }
                     }
                 } catch {
@@ -502,7 +597,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
             $wb.Close($false)
             [System.Runtime.Interopservices.Marshal]::ReleaseComObject($wb) | Out-Null
             if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
-                Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_COMPLETED" -File $file.FullName -Stage "Completed" -Message "Workbook scan completed" -Data @{ foundIpCount = @($fileDetail.foundIPs).Count; queryCount = @($fileDetail.queries).Count; connectionCount = @($fileDetail.connections).Count; vbaMatchCount = @($fileDetail.vbaMatches).Count }
+                Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_COMPLETED" -File $file.FullName -Stage "Completed" -Message "Workbook scan completed" -Data @{ foundIpCount = @($fileDetail.foundIPs).Count; foundDbCount = @($fileDetail.foundDatabases).Count; queryCount = @($fileDetail.queries).Count; connectionCount = @($fileDetail.connections).Count; vbaMatchCount = @($fileDetail.vbaMatches).Count }
             }
         } catch {
             $fileDetail.status = "Error: $_"
@@ -513,7 +608,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
 
         $fileList += $fileDetail
         if ($OperationId -and (Get-Command "Append-OperationScannedFile" -ErrorAction SilentlyContinue)) {
-            Append-OperationScannedFile -OperationId $OperationId -FileDetail $fileDetail -IpSummary $ipSummary
+            Append-OperationScannedFile -OperationId $OperationId -FileDetail $fileDetail -IpSummary $ipSummary -DbSummary $dbSummary
         }
     }
 
@@ -524,12 +619,17 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
         $null = Update-OperationProgress -OperationId $OperationId -ProcessedFiles $processedCount -TotalFiles $totalCount -CurrentFile "Tamamlandı" -CurrentStage "Completed" -ProgressPercent 100
     }
     if ($OperationId -and (Get-Command "Write-AuditLogEvent" -ErrorAction SilentlyContinue)) {
-        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_COMPLETED" -Stage "Completed" -Message "Excel directory scan completed" -Data @{ directory = $DirectoryPath; processedFiles = $processedCount; totalFiles = $totalCount; detectedIpCount = $ipSummary.Count }
+        Write-AuditLogEvent -OperationId $OperationId -Level "INFO" -EventName "SCAN_COMPLETED" -Stage "Completed" -Message "Excel directory scan completed" -Data @{ directory = $DirectoryPath; processedFiles = $processedCount; totalFiles = $totalCount; detectedIpCount = $ipSummary.Count; detectedDbCount = $dbSummary.Count }
     }
 
     $detectedIPsList = @()
     foreach ($k in $ipSummary.Keys) {
         $detectedIPsList += @{ ip = $k; count = $ipSummary[$k] }
+    }
+
+    $detectedDatabasesList = @()
+    foreach ($k in $dbSummary.Keys) {
+        $detectedDatabasesList += @{ database = $k; count = $dbSummary[$k] }
     }
 
     return @{
@@ -538,6 +638,7 @@ function Scan-ExcelDirectory ($DirectoryPath, [string]$OperationId = "") {
         totalFiles = $fileList.Count
         files = $fileList
         detectedIPs = $detectedIPsList
+        detectedDatabases = $detectedDatabasesList
     }
 }
 

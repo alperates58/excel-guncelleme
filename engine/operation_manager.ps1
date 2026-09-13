@@ -387,6 +387,7 @@ function Register-Operation {
             logs = @()
             scannedFiles = @()
             detectedIPs = @()
+            detectedDatabases = @()
             resultData = $null
             auditLogPath = Get-AuditLogFilePath -OperationId $opId
         }
@@ -605,6 +606,7 @@ function Get-OperationSnapshot ([string]$OperationId) {
             logs            = @($src.logs)
             scannedFiles    = if ($src.scannedFiles) { @($src.scannedFiles) } else { @() }
             detectedIPs     = if ($src.detectedIPs) { @($src.detectedIPs) } else { @() }
+            detectedDatabases = if ($src.detectedDatabases) { @($src.detectedDatabases) } else { @() }
             resultData      = Protect-SensitiveData $src.resultData
             auditLogPath    = if ($src.auditLogPath) { "$($src.auditLogPath)" } else { Get-AuditLogFilePath -OperationId $OperationId }
         }
@@ -620,7 +622,8 @@ function Append-OperationScannedFile {
     param(
         [Parameter(Mandatory=$true)][string]$OperationId,
         [Parameter(Mandatory=$true)][hashtable]$FileDetail,
-        [hashtable]$IpSummary = @{}
+        [hashtable]$IpSummary = @{},
+        [hashtable]$DbSummary = @{}
     )
 
     [System.Threading.Monitor]::Enter($global:OperationRegistryLock)
@@ -639,7 +642,15 @@ function Append-OperationScannedFile {
             }
             $op["detectedIPs"] = $ipList
         }
-        Write-RawAuditLogLine -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_RESULT_APPENDED" -Stage "File Result" -File "$($FileDetail.filePath)" -Message "Scanned file result appended" -Data @{ fileName = "$($FileDetail.fileName)"; status = "$($FileDetail.status)"; foundIpCount = @($FileDetail.foundIPs).Count }
+
+        if ($DbSummary -and $DbSummary.Count -gt 0) {
+            $dbList = @()
+            foreach ($k in $DbSummary.Keys) {
+                $dbList += @{ database = "$k"; count = [int]$DbSummary[$k] }
+            }
+            $op["detectedDatabases"] = $dbList
+        }
+        Write-RawAuditLogLine -OperationId $OperationId -Level "INFO" -EventName "SCAN_FILE_RESULT_APPENDED" -Stage "File Result" -File "$($FileDetail.filePath)" -Message "Scanned file result appended" -Data @{ fileName = "$($FileDetail.fileName)"; status = "$($FileDetail.status)"; foundIpCount = @($FileDetail.foundIPs).Count; foundDbCount = @($FileDetail.foundDatabases).Count }
     } finally {
         [System.Threading.Monitor]::Exit($global:OperationRegistryLock)
     }
@@ -1082,6 +1093,7 @@ function Start-AsyncOperationWorker {
                         prospectiveUpdatedFilesCount = $result.prospectiveUpdatedFilesCount
                         totalProspectiveReplacements = $result.totalProspectiveReplacements
                         detectedIpCount = if ($result.detectedIPs) { @($result.detectedIPs).Count } else { 0 }
+                        detectedDbCount = if ($result.detectedDatabases) { @($result.detectedDatabases).Count } else { 0 }
                     }
                     Write-AuditLogEvent -OperationId $opId -Level "INFO" -EventName "OPERATION_COMPLETED" -Message "Operation finished successfully" -Data $resultSummary
                 } elseif ($result.batchStatus -eq "CANCELLED") {

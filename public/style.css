@@ -417,6 +417,17 @@ input[type="text"]:focus {
     color: #000;
 }
 
+.chip-db {
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.35);
+    color: #c084fc;
+}
+
+.chip-db:hover {
+    background: #a855f7;
+    color: #fff;
+}
+
 .chip-placeholder {
     font-size: 0.8rem;
     color: var(--text-dim);
@@ -671,6 +682,7 @@ input[type="text"]:focus {
 .badge-success { background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); }
 .badge-warning { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); }
 .badge-danger { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); }
+.badge-db { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
 
 .table-responsive {
     overflow-x: auto;

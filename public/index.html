@@ -87,17 +87,25 @@
                     </div>
                 </div>
 
-                <!-- IP REPLACEMENT RULES SECTION -->
+                <!-- IP & DB REPLACEMENT RULES SECTION -->
                 <div class="card glass-card">
                     <div class="card-header">
                         <i class="fa-solid fa-network-wired"></i>
-                        <h2>IP & Metin Değişim Kuralları</h2>
+                        <h2>IP & Veritabanı Değişim Kuralları</h2>
                     </div>
                     <div class="card-body">
                         <!-- Detected IPs Quick Chips -->
                         <div class="quick-chips-section">
-                            <label>Tespit Edilen Eski IP'ler (Hızlı Seçim)</label>
+                            <label><i class="fa-solid fa-network-wired"></i> Tespit Edilen Eski IP'ler (Hızlı Seçim)</label>
                             <div id="quickChips" class="quick-chips">
+                                <span class="chip-placeholder">Henüz tarama yapılmadı</span>
+                            </div>
+                        </div>
+
+                        <!-- Detected Databases Quick Chips -->
+                        <div class="quick-chips-section mt-2">
+                            <label><i class="fa-solid fa-database"></i> Tespit Edilen Veritabanları (Hızlı Seçim)</label>
+                            <div id="quickDbChips" class="quick-chips">
                                 <span class="chip-placeholder">Henüz tarama yapılmadı</span>
                             </div>
                         </div>
@@ -107,13 +115,13 @@
                             <div class="rule-item">
                                 <div class="rule-inputs">
                                     <div class="input-field">
-                                        <small>Eski IP / Metin</small>
-                                        <input type="text" class="rule-old" placeholder="Örn: 192.168.2.15" value="192.168.2.15">
+                                        <small>Eski IP / Veritabanı</small>
+                                        <input type="text" class="rule-old" placeholder="Örn: 192.168.2.15 veya DB_ADI" value="192.168.2.15">
                                     </div>
                                     <div class="rule-arrow"><i class="fa-solid fa-arrow-right"></i></div>
                                     <div class="input-field">
-                                        <small>Yeni IP / Metin</small>
-                                        <input type="text" class="rule-new" placeholder="Örn: 10.0.0.100" value="10.0.0.100">
+                                        <small>Yeni IP / Veritabanı</small>
+                                        <input type="text" class="rule-new" placeholder="Örn: 10.0.0.100 veya YENI_DB" value="10.0.0.100">
                                     </div>
                                 </div>
                                 <button class="btn-remove-rule" title="Kuralı Sil"><i class="fa-solid fa-trash"></i></button>
@@ -232,7 +240,7 @@
                         <div class="table-actions">
                             <div class="search-box">
                                 <i class="fa-solid fa-search"></i>
-                                <input type="text" id="tableSearch" placeholder="Dosya adı veya IP ara...">
+                                <input type="text" id="tableSearch" placeholder="Dosya adı, IP veya veritabanı ara...">
                             </div>
                             <span class="badge badge-info" id="badgeFileCount">0 Dosya Listelendi</span>
                         </div>
@@ -247,7 +255,7 @@
                                         <th>Power Query</th>
                                         <th>Bağlantılar</th>
                                         <th>VBA Makro</th>
-                                        <th>Bulunan IP'ler</th>
+                                        <th>Bulunan IP & DB</th>
                                         <th>Durum</th>
                                         <th>Detay</th>
                                     </tr>

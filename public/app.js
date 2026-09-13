@@ -91,6 +91,7 @@ const btnExecuteUpdate = document.getElementById('btnExecuteUpdate');
 const btnAddRule = document.getElementById('btnAddRule');
 const rulesList = document.getElementById('rulesList');
 const quickChips = document.getElementById('quickChips');
+const quickDbChips = document.getElementById('quickDbChips');
 
 // Options
 const chkQueries = document.getElementById('chkQueries');
@@ -758,6 +759,7 @@ async function runScan() {
     statConnections.textContent = '0';
     statVbaModules.textContent = '0';
     quickChips.innerHTML = `<span class="chip-placeholder"><i class="fa-solid fa-spinner fa-spin"></i> IP adresleri taranıyor...</span>`;
+    if (quickDbChips) quickDbChips.innerHTML = `<span class="chip-placeholder"><i class="fa-solid fa-spinner fa-spin"></i> Veritabanları taranıyor...</span>`;
 
     // Activate Progress Bar Section
     progressSection.classList.remove('hidden');
@@ -882,7 +884,7 @@ function pollScanProgress(opId, dir) {
                 badgeFileCount.textContent = `${scanRenderedFileCount} / ${totalText} Dosya Taranıyor...`;
             }
 
-            // 4. Live Discovered IP Chips
+            // 4. Live Discovered IP & Database Chips
             const detectedIPs = ensureArray(snap.detectedIPs);
             if (detectedIPs.length > 0) {
                 quickChips.innerHTML = '';
@@ -891,8 +893,23 @@ function pollScanProgress(opId, dir) {
                         const chip = document.createElement('span');
                         chip.className = 'chip';
                         chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${escapeHtml(item.ip)} (${item.count || 1})`;
-                        chip.addEventListener('click', () => setRuleOldIP(item.ip));
+                        chip.addEventListener('click', () => setRuleOldValue(item.ip));
                         quickChips.appendChild(chip);
+                    }
+                });
+            }
+
+            const detectedDatabases = ensureArray(snap.detectedDatabases);
+            if (quickDbChips && detectedDatabases.length > 0) {
+                quickDbChips.innerHTML = '';
+                detectedDatabases.forEach(item => {
+                    const dbName = item ? (item.database || item.name) : '';
+                    if (dbName) {
+                        const chip = document.createElement('span');
+                        chip.className = 'chip chip-db';
+                        chip.innerHTML = `<i class="fa-solid fa-database"></i> ${escapeHtml(dbName)} (${item.count || 1})`;
+                        chip.addEventListener('click', () => setRuleOldValue(dbName));
+                        quickDbChips.appendChild(chip);
                     }
                 });
             }
@@ -916,7 +933,8 @@ function pollScanProgress(opId, dir) {
                     directory: dir,
                     totalFiles: scanRenderedFileCount,
                     files: snap.scannedFiles || [],
-                    detectedIPs: snap.detectedIPs || []
+                    detectedIPs: snap.detectedIPs || [],
+                    detectedDatabases: snap.detectedDatabases || []
                 };
 
                 if (currentScanData.files.length === 0) {
@@ -1010,7 +1028,20 @@ function createTableRow(f, idx, animate = false) {
     const qCount = f.queries ? f.queries.length : 0;
     const cCount = f.connections ? f.connections.length : 0;
     const vCount = f.vbaMatches ? f.vbaMatches.length : 0;
-    const ipsStr = f.foundIPs && f.foundIPs.length > 0 ? f.foundIPs.join(', ') : '-';
+    const ipsStr = f.foundIPs && f.foundIPs.length > 0 ? f.foundIPs.join(', ') : '';
+    const dbsStr = f.foundDatabases && f.foundDatabases.length > 0 ? f.foundDatabases.join(', ') : '';
+
+    let ipDbHtml = '';
+    if (ipsStr) {
+        ipDbHtml += `<code class="text-primary">${escapeHtml(ipsStr)}</code>`;
+    }
+    if (dbsStr) {
+        if (ipDbHtml) ipDbHtml += '<div style="margin-top:3px;"></div>';
+        ipDbHtml += `<span class="badge badge-db"><i class="fa-solid fa-database"></i> ${escapeHtml(dbsStr)}</span>`;
+    }
+    if (!ipDbHtml) {
+        ipDbHtml = '<span class="text-dim">-</span>';
+    }
 
     let badgeClass = 'badge-info';
     let statusLabel = f.status || 'Taranmış';
@@ -1027,7 +1058,7 @@ function createTableRow(f, idx, animate = false) {
         <td>${qCount > 0 ? `<span class="badge badge-info">${qCount} Sorgu</span>` : '<span class="text-dim">0</span>'}</td>
         <td>${cCount > 0 ? `<span class="badge badge-warning">${cCount} Bağlantı</span>` : '<span class="text-dim">0</span>'}</td>
         <td>${vCount > 0 ? `<span class="badge badge-success">${vCount} Makro</span>` : '<span class="text-dim">0</span>'}</td>
-        <td><code class="text-primary">${escapeHtml(ipsStr)}</code></td>
+        <td>${ipDbHtml}</td>
         <td><span class="badge ${badgeClass}">${escapeHtml(statusLabel)}</span></td>
         <td>
             <button class="btn btn-outline-sm btn-detail" data-index="${idx}">
@@ -1040,21 +1071,51 @@ function createTableRow(f, idx, animate = false) {
     return tr;
 }
 
-function renderScanResults(data) {
+function renderQuickChips(detectedIPs) {
     quickChips.innerHTML = '';
-    if (data.detectedIPs && data.detectedIPs.length > 0) {
-        data.detectedIPs.forEach(item => {
-            const chip = document.createElement('span');
-            chip.className = 'chip';
-            chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${escapeHtml(item.ip)} (${item.count})`;
-            chip.addEventListener('click', () => {
-                setRuleOldIP(item.ip);
-            });
-            quickChips.appendChild(chip);
+    const items = ensureArray(detectedIPs);
+    if (items.length > 0) {
+        items.forEach(item => {
+            if (item && item.ip) {
+                const chip = document.createElement('span');
+                chip.className = 'chip';
+                chip.innerHTML = `<i class="fa-solid fa-network-wired"></i> ${escapeHtml(item.ip)} (${item.count || 1})`;
+                chip.addEventListener('click', () => {
+                    setRuleOldValue(item.ip);
+                });
+                quickChips.appendChild(chip);
+            }
         });
     } else {
         quickChips.innerHTML = `<span class="chip-placeholder">IP adresi tespit edilmedi.</span>`;
     }
+}
+
+function renderQuickDbChips(detectedDatabases) {
+    if (!quickDbChips) return;
+    quickDbChips.innerHTML = '';
+    const items = ensureArray(detectedDatabases);
+    if (items.length > 0) {
+        items.forEach(item => {
+            const dbName = item ? (item.database || item.name) : '';
+            if (dbName) {
+                const chip = document.createElement('span');
+                chip.className = 'chip chip-db';
+                chip.innerHTML = `<i class="fa-solid fa-database"></i> ${escapeHtml(dbName)} (${item.count || 1})`;
+                chip.addEventListener('click', () => {
+                    setRuleOldValue(dbName);
+                });
+                quickDbChips.appendChild(chip);
+            }
+        });
+    } else {
+        quickDbChips.innerHTML = `<span class="chip-placeholder">Veritabanı tespit edilmedi.</span>`;
+    }
+}
+
+function renderScanResults(data) {
+    renderQuickChips(data.detectedIPs);
+    renderQuickDbChips(data.detectedDatabases);
 
     statTotalFiles.textContent = data.totalFiles || 0;
     
@@ -1109,7 +1170,8 @@ function filterTable() {
 
     const filtered = currentScanData.files.filter(f => {
         return f.fileName.toLowerCase().includes(q) || 
-               (f.foundIPs && f.foundIPs.some(ip => ip.includes(q)));
+               (f.foundIPs && f.foundIPs.some(ip => ip.toLowerCase().includes(q))) ||
+               (f.foundDatabases && f.foundDatabases.some(db => db.toLowerCase().includes(q)));
     });
 
     renderTable(filtered);
@@ -1126,6 +1188,7 @@ function showFileModal(file) {
             <p><strong>Tam Yol:</strong> <code>${escapeHtml(file.filePath)}</code></p>
             <p><strong>Boyut:</strong> ${(file.sizeBytes / 1024 / 1024).toFixed(2)} MB</p>
             <p><strong>SHA256:</strong> <code style="font-size:0.75rem">${escapeHtml(file.sha256 || 'Mevcut Değil')}</code></p>
+            <p><strong>Tespit Edilen Veritabanları:</strong> ${file.foundDatabases && file.foundDatabases.length > 0 ? file.foundDatabases.map(db => `<span class="badge badge-db"><i class="fa-solid fa-database"></i> ${escapeHtml(db)}</span>`).join(' ') : '<span class="text-dim">Yok</span>'}</p>
             <hr class="divider">
     `;
 
@@ -1420,13 +1483,13 @@ function addRuleRow(oldVal = '', newVal = '') {
     div.innerHTML = `
         <div class="rule-inputs">
             <div class="input-field">
-                <small>Eski IP / Metin</small>
-                <input type="text" class="rule-old" placeholder="Örn: 192.168.2.15" value="${escapeHtml(oldVal)}">
+                <small>Eski IP / Veritabanı</small>
+                <input type="text" class="rule-old" placeholder="Örn: 192.168.2.15 veya DB_ADI" value="${escapeHtml(oldVal)}">
             </div>
             <div class="rule-arrow"><i class="fa-solid fa-arrow-right"></i></div>
             <div class="input-field">
-                <small>Yeni IP / Metin</small>
-                <input type="text" class="rule-new" placeholder="Örn: 10.0.0.100" value="${escapeHtml(newVal)}">
+                <small>Yeni IP / Veritabanı</small>
+                <input type="text" class="rule-new" placeholder="Örn: 10.0.0.100 veya YENI_DB" value="${escapeHtml(newVal)}">
             </div>
         </div>
         <button class="btn-remove-rule" title="Kuralı Sil"><i class="fa-solid fa-trash"></i></button>
@@ -1439,13 +1502,17 @@ function addRuleRow(oldVal = '', newVal = '') {
     rulesList.appendChild(div);
 }
 
-function setRuleOldIP(ip) {
+function setRuleOldValue(val) {
     const firstRuleOld = rulesList.querySelector('.rule-old');
     if (firstRuleOld && (!firstRuleOld.value || firstRuleOld.value === '192.168.2.15')) {
-        firstRuleOld.value = ip;
+        firstRuleOld.value = val;
     } else {
-        addRuleRow(ip, '');
+        addRuleRow(val, '');
     }
+}
+
+function setRuleOldIP(ip) {
+    setRuleOldValue(ip);
 }
 
 function getRules() {
